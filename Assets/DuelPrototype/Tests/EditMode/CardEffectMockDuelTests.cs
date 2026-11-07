@@ -82,9 +82,7 @@ namespace DuelPrototype.Tests
             monster.SummonedTurnNumber = 1;
             monster.HasAttacked = true;
             engine.Human.MonsterZones[2] = monster;
-            CardInstance setTrap = engine.Human.Deck[0];
-            engine.Human.Deck.RemoveAt(0);
-            setTrap.FaceUp = false;
+            CardInstance setTrap = new CardInstance(StarterCatalog.Find("44095762"), false);
             engine.Human.SpellTrapZones[4] = setTrap;
             engine.Human.LifePoints = 6200;
             SetPhase(DuelPhase.MainTwo);
@@ -94,7 +92,7 @@ namespace DuelPrototype.Tests
             Assert.AreEqual(DuelPhase.MainTwo, restored.Phase);
             Assert.AreEqual(engine.TurnNumber, restored.TurnNumber);
             Assert.AreEqual(6200, restored.Human.LifePoints);
-            Assert.AreEqual(18, restored.Human.Deck.Count);
+            Assert.AreEqual(19, restored.Human.Deck.Count);
             Assert.AreEqual(monster.Definition.CardId, restored.Human.MonsterZones[2].Definition.CardId);
             Assert.AreEqual(400, restored.Human.MonsterZones[2].AttackBonus);
             Assert.IsTrue(restored.Human.MonsterZones[2].HasAttacked);
@@ -119,6 +117,16 @@ namespace DuelPrototype.Tests
         {
             DuelStateSnapshot snapshot = engine.CaptureState();
             snapshot.schemaVersion = 2;
+
+            Assert.Throws<FormatException>(() =>
+                DuelStateJson.Deserialize(JsonUtility.ToJson(snapshot)));
+        }
+
+        [Test]
+        public void Duel_state_json_rejects_cards_referenced_by_multiple_zones()
+        {
+            DuelStateSnapshot snapshot = engine.CaptureState();
+            snapshot.human.hand = new[] { snapshot.human.deck[0] };
 
             Assert.Throws<FormatException>(() =>
                 DuelStateJson.Deserialize(JsonUtility.ToJson(snapshot)));

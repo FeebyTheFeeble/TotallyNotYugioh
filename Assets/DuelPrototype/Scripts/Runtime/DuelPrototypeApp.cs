@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.UI;
 using UnityEngine.UI;
 
@@ -11,6 +12,8 @@ namespace DuelPrototype
 {
     public sealed class WheelScrollRect : ScrollRect
     {
+        public Action<int> PageBoundaryScrolled;
+
         public override void OnScroll(PointerEventData eventData)
         {
             Vector2 originalScrollDelta = eventData.scrollDelta;
@@ -20,6 +23,8 @@ namespace DuelPrototype
             if (horizontal && !vertical && normalizedScrollDelta.x == 0f)
                 normalizedScrollDelta = new Vector2(normalizedScrollDelta.y, 0f);
 
+            bool contentFitsViewport = vertical && content != null && viewport != null &&
+                content.rect.height <= viewport.rect.height;
             eventData.scrollDelta = normalizedScrollDelta;
             try
             {
@@ -29,6 +34,37 @@ namespace DuelPrototype
             {
                 eventData.scrollDelta = originalScrollDelta;
             }
+
+            if (!vertical || PageBoundaryScrolled == null || normalizedScrollDelta.y == 0f)
+                return;
+            if (normalizedScrollDelta.y < 0f &&
+                (contentFitsViewport || verticalNormalizedPosition <= 0.001f))
+                PageBoundaryScrolled(1);
+            else if (normalizedScrollDelta.y > 0f &&
+                (contentFitsViewport || verticalNormalizedPosition >= 0.999f))
+                PageBoundaryScrolled(-1);
+        }
+    }
+
+    public sealed class ScrollWheelForwarder : MonoBehaviour, IScrollHandler
+    {
+        public WheelScrollRect ScrollTarget;
+
+        public void OnScroll(PointerEventData eventData)
+        {
+            if (ScrollTarget != null)
+                ScrollTarget.OnScroll(eventData);
+        }
+    }
+
+    public sealed class RightClickAction : MonoBehaviour, IPointerClickHandler
+    {
+        public Action OnRightClick;
+
+        public void OnPointerClick(PointerEventData eventData)
+        {
+            if (eventData.button == PointerEventData.InputButton.Right)
+                OnRightClick?.Invoke();
         }
     }
 
@@ -106,9 +142,13 @@ namespace DuelPrototype
         }
 
         private const string ProfileKey = "DuelPrototype.Profile.v1";
-        private const float BoardCardWidth = 0.06f;
+        private const float BoardCardWidth = 0.052f;
         private const float BoardCardStepX = 0.075f;
-        private const float OpponentDeckX = 0.70f;
+        private const float OpponentDeckX = 0.73f;
+        private const float OpponentSpellTrapY = 0.72f;
+        private const float OpponentMonsterY = 0.56f;
+        private const float HumanMonsterY = 0.39f;
+        private const float HumanSpellTrapY = 0.22f;
         private const float HandCardHeight = 0.112f;
         private const float HandCardGap = 0.008f;
         private const float HandMaxWidth = 0.68f;
@@ -126,6 +166,7 @@ namespace DuelPrototype
         private MockDuelSimulator mockDuelSimulator;
         private Canvas canvas;
         private CanvasGroup canvasInputGroup;
+        private RectTransform headerRoot;
         private Text creditsText;
         private RectTransform contentRoot;
         private RectTransform cardPreviewRoot;
@@ -161,6 +202,7 @@ namespace DuelPrototype
         private string notice = "";
         private Font font;
         private bool matchRewardGranted;
+        private bool forfeitConfirmOpen;
         private int firstAiDeckIndex;
         private int secondAiDeckIndex = 1;
         private int deckPage;
@@ -169,10 +211,14 @@ namespace DuelPrototype
         private CardLibraryFilter cardLibraryFilter;
         private bool cardFilterOptionsOpen;
         private int deckLibraryPage;
+        private float deckLibraryScrollPosition = 1f;
         private int cardLibraryPage;
+        private float cardLibraryScrollPosition = 1f;
+        private string cardLibrarySearchQuery = "";
         private CardDefinition selectedTestCard;
         private string testCardSearchQuery = "";
         private int testCardPage;
+        private float testCardScrollPosition = 1f;
         private TestLabFilter openTestFilter;
         private string testKindFilter = "All";
         private string testTypeFilter = "All";
@@ -185,6 +231,7 @@ namespace DuelPrototype
         private readonly Queue<CardMovementAnimation> cardAnimationQueue = new Queue<CardMovementAnimation>();
         private readonly Queue<AttackAnimation> attackAnimationQueue = new Queue<AttackAnimation>();
         private readonly Queue<string> phaseTickerQueue = new Queue<string>();
+        private Action phaseTickerCompletion;
         private readonly Dictionary<CardInstance, CardVisualState> pendingDrawnCardStates =
             new Dictionary<CardInstance, CardVisualState>();
         private Dictionary<CardInstance, CardVisualState> lastCardVisualStates;
@@ -201,6 +248,8 @@ namespace DuelPrototype
         private bool aiHandsOpen;
         private bool aiAutoplay;
         private float nextAiStepTime;
+        private float headerRevealUntil;
+        private bool headerWasVisible = true;
         private readonly float[] aiAutoplayPaces = { 5f, 10f, 15f };
         private int aiAutoplayPaceIndex = 1;
         private float BoardCardHeight => GetPortraitHeight(BoardCardWidth);
@@ -238,12 +287,12 @@ namespace DuelPrototype
             font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             LoadProfile();
             BuildCanvas();
-            StartDuel();
             Render();
         }
 
         private void Update()
         {
+            UpdateHeaderVisibility();
             if (screen != ScreenMode.AiLab || !aiAutoplay || engine == null || engine.Phase == DuelPhase.GameOver ||
                 Time.unscaledTime < nextAiStepTime)
                 return;
@@ -319,6 +368,60 @@ namespace DuelPrototype
             engine = new DuelEngine();
             engine.StartMatch(deck, StarterCatalog.CreateAiDeck());
             ClearSelection();
+        }
+
+        private void StartDuelFromMenu()
+        {
+            StartDuel();
+            if (engine == null)
+            {
+                Render();
+                return;
+            }
+
+            QueuePhaseTicker("DUEL START");
+            Render();
+        }
+
+        private void ForfeitDuel()
+        {
+            if (screen != ScreenMode.Duel || engine == null || engine.Phase == DuelPhase.GameOver)
+                return;
+
+            forfeitConfirmOpen = false;
+            Render(false);
+            QueuePhaseTicker("FORFEIT", () =>
+            {
+                engine = null;
+                matchRewardGranted = false;
+                notice = "";
+                ClearSelection();
+                graveyardOwner = null;
+                selectedGraveyardCard = null;
+                deckOwner = null;
+                selectedDeckCard = null;
+                extraDeckOpen = false;
+                forfeitConfirmOpen = false;
+                Render();
+            });
+        }
+
+        private void OpenForfeitConfirmation()
+        {
+            if (screen != ScreenMode.Duel || engine == null || engine.Phase == DuelPhase.GameOver)
+                return;
+
+            forfeitConfirmOpen = true;
+            Render();
+        }
+
+        private void QueuePhaseTicker(string label, Action onComplete = null)
+        {
+            phaseTickerQueue.Enqueue(label);
+            if (onComplete != null)
+                phaseTickerCompletion = onComplete;
+            if (phaseTickerRoutine == null)
+                phaseTickerRoutine = StartCoroutine(PlayPhaseTicker());
         }
 
         private void StartAiMatch()
@@ -416,7 +519,8 @@ namespace DuelPrototype
 
         private void BuildHeader(RectTransform root)
         {
-            RectTransform header = AddPanel(root, 0, 0.9f, 1, 1, new Color(0.055f, 0.08f, 0.12f));
+            headerRoot = AddPanel(root, 0, 0.9f, 1, 1, new Color(0.055f, 0.08f, 0.12f));
+            RectTransform header = headerRoot;
             AddText(header, "SYNCHRO / DUEL LAB", 0.025f, 0.22f, 0.32f, 0.78f, 27, accentColor, TextAnchor.MiddleLeft, true);
             AddText(header, "A tactical card-dueling prototype", 0.025f, 0, 0.38f, 0.28f, 13, mutedColor, TextAnchor.MiddleLeft);
             AddHeaderTab(header, ScreenMode.Duel, "DUEL", 0.34f, 0.42f, new Color(0.15f, 0.22f, 0.31f));
@@ -434,6 +538,42 @@ namespace DuelPrototype
             creditsText.alignment = TextAnchor.MiddleRight;
             creditsText.fontStyle = FontStyle.Bold;
             UpdateCreditsText();
+        }
+
+        private void UpdateHeaderVisibility()
+        {
+            if (headerRoot == null)
+                return;
+
+            bool duelScreen = screen == ScreenMode.Duel;
+            bool gameplayScreen = screen == ScreenMode.AiLab && engine != null ||
+                screen == ScreenMode.TestLab && mockDuelSimulator != null;
+            bool showHeader = !duelScreen && !gameplayScreen;
+            if (gameplayScreen && Mouse.current != null)
+            {
+                Vector2 pointerPosition = Mouse.current.position.ReadValue();
+                if (pointerPosition.y >= Screen.height - 3f)
+                    headerRevealUntil = Time.unscaledTime + 1.25f;
+                if (RectTransformUtility.RectangleContainsScreenPoint(headerRoot, pointerPosition, null))
+                    headerRevealUntil = Time.unscaledTime + 0.75f;
+                showHeader = Time.unscaledTime < headerRevealUntil;
+            }
+            else if (gameplayScreen)
+            {
+                showHeader = true;
+            }
+
+            if (showHeader != headerWasVisible)
+            {
+                headerWasVisible = showHeader;
+                if (showHeader)
+                    headerRoot.SetAsLastSibling();
+            }
+
+            float hiddenOffset = headerRoot.rect.height + 4f;
+            Vector2 target = showHeader ? Vector2.zero : new Vector2(0f, hiddenOffset);
+            headerRoot.anchoredPosition = Vector2.MoveTowards(
+                headerRoot.anchoredPosition, target, 1400f * Time.unscaledDeltaTime);
         }
 
         private void AddHeaderTab(RectTransform header, ScreenMode mode, string label, float xMin, float xMax, Color baseColor)
@@ -464,7 +604,8 @@ namespace DuelPrototype
 
         private void SwitchScreen(ScreenMode mode)
         {
-            bool restartStandardDuel = mode == ScreenMode.Duel && engine != null &&
+            forfeitConfirmOpen = false;
+            bool returnToDuelStart = mode == ScreenMode.Duel && engine != null &&
                 (engine.IsAiVsAi || (mockDuelSimulator != null && engine == mockDuelSimulator.Engine));
             if (screen == ScreenMode.TestLab && mode != ScreenMode.TestLab && mockDuelSimulator != null)
             {
@@ -481,21 +622,22 @@ namespace DuelPrototype
                 aiAutoplay = false;
                 notice = "Autoplay paused when you left the AI Lab.";
             }
-            if (restartStandardDuel)
+            if (returnToDuelStart)
             {
                 mockDuelSimulator = null;
-                StartDuel();
+                engine = null;
             }
             screen = mode;
             Render();
         }
 
-        private void Render()
+        private void Render(bool advancePhases = true)
         {
             if (contentRoot == null)
                 return;
             BindEngineEvents();
-            AdvanceAutomaticPhases();
+            if (advancePhases)
+                AdvanceAutomaticPhases();
             TrackCardVisualChanges();
             HideCardPreview();
             AwardMatchIfNeeded();
@@ -539,6 +681,8 @@ namespace DuelPrototype
             if (engine != null && engine.SearchChoiceOpen &&
                 (screen == ScreenMode.Duel || screen == ScreenMode.TestLab))
                 DrawSanganSearchOverlay();
+            if (forfeitConfirmOpen && screen == ScreenMode.Duel && engine != null)
+                DrawForfeitConfirmationOverlay();
         }
 
         private void BindEngineEvents()
@@ -746,29 +890,58 @@ namespace DuelPrototype
                         0.018f + GetPortraitHeight(width) * 0.5f);
                 case CardVisualZone.Monster:
                     return new Vector2(MonsterCardStartX + state.Index * MonsterCardStepX + BoardCardWidth * 0.5f,
-                        (state.Owner == engine.Opponent ? 0.59f : 0.35f) + BoardCardHeight * 0.5f);
+                        GetMonsterZoneY(state.Owner) + BoardCardHeight * 0.5f);
                 case CardVisualZone.SpellTrap:
                     return new Vector2(MonsterCardStartX + state.Index * MonsterCardStepX + BoardCardWidth * 0.5f,
-                        (state.Owner == engine.Opponent ? 0.75f : 0.19f) + BoardCardHeight * 0.5f);
+                        GetSpellTrapZoneY(state.Owner) + BoardCardHeight * 0.5f);
                 case CardVisualZone.FieldSpell:
                     return state.Owner == engine.Opponent
-                        ? new Vector2(OpponentDeckX + BoardCardWidth * 0.5f, 0.59f + BoardCardHeight * 0.5f)
-                        : new Vector2(0.205f + BoardCardWidth * 0.5f, 0.35f + BoardCardHeight * 0.5f);
+                        ? new Vector2(OpponentDeckX + BoardCardWidth * 0.5f,
+                            GetFieldSpellZoneY(true) + BoardCardHeight * 0.5f)
+                        : new Vector2(0.205f + BoardCardWidth * 0.5f,
+                            GetFieldSpellZoneY(false) + BoardCardHeight * 0.5f);
                 case CardVisualZone.Graveyard:
                     return state.Owner == engine.Opponent
-                        ? new Vector2(0.205f + BoardCardWidth * 0.5f, 0.75f + BoardCardHeight * 0.5f)
-                        : new Vector2(0.74f + BoardCardWidth * 0.5f, 0.19f + BoardCardHeight * 0.5f);
+                        ? new Vector2(0.205f + BoardCardWidth * 0.5f,
+                            GetSpellTrapZoneY(state.Owner) + BoardCardHeight * 0.5f)
+                        : new Vector2(0.74f + BoardCardWidth * 0.5f,
+                            GetSpellTrapZoneY(state.Owner) + BoardCardHeight * 0.5f);
                 case CardVisualZone.Banished:
                     return state.Owner == engine.Opponent
-                        ? new Vector2(0.205f + BoardCardWidth * 0.5f, 0.59f + BoardCardHeight * 0.5f)
-                        : new Vector2(0.74f + BoardCardWidth * 0.5f, 0.35f + BoardCardHeight * 0.5f);
+                        ? new Vector2(0.205f + BoardCardWidth * 0.5f,
+                            GetMonsterZoneY(state.Owner) + BoardCardHeight * 0.5f)
+                        : new Vector2(0.74f + BoardCardWidth * 0.5f,
+                            GetMonsterZoneY(state.Owner) + BoardCardHeight * 0.5f);
                 case CardVisualZone.ExtraDeck:
                     return new Vector2(0.86f + 0.115f * 0.5f, 0.018f + 0.112f * 0.5f);
                 default:
                     return state.Owner == engine.Opponent
-                        ? new Vector2(OpponentDeckX + BoardCardWidth * 0.5f, 0.75f + BoardCardHeight * 0.5f)
-                        : new Vector2(0.205f + BoardCardWidth * 0.5f, 0.19f + BoardCardHeight * 0.5f);
+                        ? new Vector2(OpponentDeckX + BoardCardWidth * 0.5f,
+                            GetSpellTrapZoneY(state.Owner) + BoardCardHeight * 0.5f)
+                        : new Vector2(0.205f + BoardCardWidth * 0.5f,
+                            GetSpellTrapZoneY(state.Owner) + BoardCardHeight * 0.5f);
             }
+        }
+
+        private float GetMonsterZoneY(DuelPlayer owner)
+        {
+            if (screen == ScreenMode.AiLab)
+                return owner == engine.Opponent ? 0.59f : 0.35f;
+            return owner == engine.Opponent ? OpponentMonsterY : HumanMonsterY;
+        }
+
+        private float GetSpellTrapZoneY(DuelPlayer owner)
+        {
+            if (screen == ScreenMode.AiLab)
+                return owner == engine.Opponent ? 0.75f : 0.19f;
+            return owner == engine.Opponent ? OpponentSpellTrapY : HumanSpellTrapY;
+        }
+
+        private float GetFieldSpellZoneY(bool opponent)
+        {
+            if (screen == ScreenMode.AiLab)
+                return opponent ? 0.59f : 0.35f;
+            return opponent ? OpponentMonsterY : HumanMonsterY;
         }
 
         private Vector2 GetCardVisualSize(CardVisualState state)
@@ -956,9 +1129,7 @@ namespace DuelPrototype
         {
             if (phase == DuelPhase.GameOver || engine == null || canvas == null)
                 return;
-            phaseTickerQueue.Enqueue(GetPhaseTickerLabel(phase));
-            if (phaseTickerRoutine == null)
-                phaseTickerRoutine = StartCoroutine(PlayPhaseTicker());
+            QueuePhaseTicker(GetPhaseTickerLabel(phase));
         }
 
         private static string GetPhaseTickerLabel(DuelPhase phase)
@@ -1025,6 +1196,9 @@ namespace DuelPrototype
             Destroy(inputBlocker.gameObject);
             canvasInputGroup.interactable = true;
             phaseTickerRoutine = null;
+            Action onComplete = phaseTickerCompletion;
+            phaseTickerCompletion = null;
+            onComplete?.Invoke();
         }
 
         private void AddPhaseTickerEdge(RectTransform ticker, bool top)
@@ -1137,9 +1311,26 @@ namespace DuelPrototype
         {
             if (engine == null)
             {
-                AddText(contentRoot, "BUILD YOUR DECK", 0.15f, 0.5f, 0.85f, 0.7f, 32, Color.white, TextAnchor.MiddleCenter, true);
-                AddText(contentRoot, notice, 0.15f, 0.35f, 0.85f, 0.5f, 20, mutedColor, TextAnchor.MiddleCenter);
-                AddButton(contentRoot, "OPEN DECK BUILDER", 0.35f, 0.2f, 0.65f, 0.31f, accentColor, () => SwitchScreen(ScreenMode.Deck), 18);
+                AddText(contentRoot, "SYNCHRO / DUEL LAB", 0.2f, 0.62f, 0.8f, 0.72f,
+                    34, accentColor, TextAnchor.MiddleCenter, true);
+                AddText(contentRoot, "Ready to duel?", 0.2f, 0.54f, 0.8f, 0.6f,
+                    20, Color.white, TextAnchor.MiddleCenter);
+                AddButton(contentRoot, "START DUEL", 0.38f, 0.4f, 0.62f, 0.49f,
+                    accentColor, StartDuelFromMenu, 20);
+                AddPanel(contentRoot, 0.14f, 0.2f, 0.86f, 0.29f, panelColor);
+                AddButton(contentRoot, "DECK BUILDER", 0.15f, 0.21f, 0.29f, 0.28f,
+                    new Color(0.15f, 0.22f, 0.31f), () => SwitchScreen(ScreenMode.Deck), 11);
+                AddButton(contentRoot, "CARD LIST", 0.295f, 0.21f, 0.43f, 0.28f,
+                    new Color(0.15f, 0.22f, 0.31f), () => SwitchScreen(ScreenMode.Cards), 11);
+                AddButton(contentRoot, "SHOP", 0.435f, 0.21f, 0.565f, 0.28f,
+                    new Color(0.15f, 0.22f, 0.31f), () => SwitchScreen(ScreenMode.Shop), 11);
+                AddButton(contentRoot, "AI LAB", 0.57f, 0.21f, 0.705f, 0.28f,
+                    new Color(0.36f, 0.23f, 0.5f), () => SwitchScreen(ScreenMode.AiLab), 11);
+                AddButton(contentRoot, "UNIT TESTS", 0.71f, 0.21f, 0.85f, 0.28f,
+                    new Color(0.12f, 0.42f, 0.4f), () => SwitchScreen(ScreenMode.TestLab), 11);
+                if (!string.IsNullOrEmpty(notice))
+                    AddText(contentRoot, notice, 0.2f, 0.12f, 0.8f, 0.18f,
+                        14, new Color(1f, 0.78f, 0.35f), TextAnchor.MiddleCenter);
                 return;
             }
 
@@ -1150,31 +1341,18 @@ namespace DuelPrototype
                 0.095f, 0.805f, 0.195f, 0.9f, 17, Color.white, TextAnchor.MiddleLeft, true);
             if (!humanTurn && engine.Phase != DuelPhase.GameOver)
                 DrawCurrentTurnLabel(0.095f, 0.75f, 0.195f, 0.79f);
-            DrawGraveyardButton(engine.Opponent, 0.205f, 0.75f);
-            DrawDeckButton(engine.Opponent, OpponentDeckX, 0.75f);
-            DrawBanishedIndicator(engine.Opponent, 0.205f, 0.59f);
-            DrawSpellTrapRow(engine.Opponent.SpellTrapZones, 0.75f);
+            DrawGraveyardButton(engine.Opponent, 0.205f, OpponentSpellTrapY);
+            DrawDeckButton(engine.Opponent, OpponentDeckX, OpponentSpellTrapY);
+            DrawBanishedIndicator(engine.Opponent, 0.205f, OpponentMonsterY);
+            DrawSpellTrapRow(engine.Opponent.SpellTrapZones, OpponentSpellTrapY);
             DrawFieldSpellSlot(engine.Opponent.FieldSpellZone, true);
-            DrawZoneRow(engine.Opponent.MonsterZones, 0.59f, true);
+            DrawZoneRow(engine.Opponent.MonsterZones, OpponentMonsterY, true);
+            DrawOpponentHandBacks();
 
-            string prompt = engine.Phase == DuelPhase.GameOver
-                ? engine.Winner + " wins. Start a new duel whenever you're ready."
-                : PhasePrompt();
-            if (screen == ScreenMode.TestLab && mockDuelSimulator != null)
-            {
-                CardDefinition focus = mockDuelSimulator.FocusCard.Definition;
-                string effectStatus = focus.Effect != CardEffect.None
-                    ? engine.PhaseLabel
-                    : RequiresEffectResolver(focus) ? "UNIMPLEMENTED" : "NO EFFECT";
-                prompt = "UNIT TEST  •  " + mockDuelSimulator.FocusCard.Definition.DisplayName + "  •  " +
-                    mockDuelSimulator.ManualResult + "  •  " + effectStatus;
-            }
             DrawPhaseTrack();
-            AddText(contentRoot, "TURN " + engine.TurnNumber + "  •  " + prompt,
-                0.025f, 0.565f, 0.975f, 0.588f, 12, accentColor, TextAnchor.MiddleCenter, true);
 
-            DrawZoneRow(engine.Human.MonsterZones, 0.35f, false);
-            DrawSpellTrapRow(engine.Human.SpellTrapZones, 0.19f);
+            DrawZoneRow(engine.Human.MonsterZones, HumanMonsterY, false);
+            DrawSpellTrapRow(engine.Human.SpellTrapZones, HumanSpellTrapY);
             DrawFieldSpellSlot(engine.Human.FieldSpellZone, false);
             DrawPlayerPortrait("YOU", 0.025f, 0.2f, 0.085f, 0.296f,
                 new Color(0.12f, 0.36f, 0.4f), humanTurn);
@@ -1182,9 +1360,9 @@ namespace DuelPrototype
                 0.095f, 0.2f, 0.195f, 0.296f, 17, Color.white, TextAnchor.MiddleLeft, true);
             if (humanTurn)
                 DrawCurrentTurnLabel(0.095f, 0.3f, 0.195f, 0.34f);
-            DrawDeckButton(engine.Human, 0.205f, 0.19f);
-            DrawGraveyardButton(engine.Human, 0.74f, 0.19f);
-            DrawBanishedIndicator(engine.Human, 0.74f, 0.35f);
+            DrawDeckButton(engine.Human, 0.205f, HumanSpellTrapY);
+            DrawGraveyardButton(engine.Human, 0.74f, HumanSpellTrapY);
+            DrawBanishedIndicator(engine.Human, 0.74f, HumanMonsterY);
 
             DrawActionBar();
             DrawExtraDeck();
@@ -1197,42 +1375,57 @@ namespace DuelPrototype
                 DrawResponseWindow();
         }
 
+        private void DrawOpponentHandBacks()
+        {
+            int cardCount = engine.Opponent.Hand.Count;
+            if (cardCount == 0)
+                return;
+
+            const int maxVisibleCards = 10;
+            int visibleCards = Mathf.Min(cardCount, maxVisibleCards);
+            float baseWidth = GetPortraitWidth(HandCardHeight);
+            float cardGap = Mathf.Min(HandCardGap, HandMaxWidth / Mathf.Max(1, visibleCards - 1));
+            float cardWidth = Mathf.Min(baseWidth, (HandMaxWidth - (visibleCards - 1) * cardGap) / visibleCards);
+            float cardHeight = GetPortraitHeight(cardWidth);
+            float totalWidth = visibleCards * cardWidth + (visibleCards - 1) * cardGap;
+            float startX = (1f - totalWidth) * 0.5f;
+            for (int i = 0; i < visibleCards; i++)
+            {
+                float xMin = startX + i * (cardWidth + cardGap);
+                RectTransform cardBack = AddPanel(contentRoot, xMin, 0.875f, xMin + cardWidth,
+                    0.875f + cardHeight, new Color(0.08f, 0.16f, 0.3f));
+                AddCardArtPlaceholder(cardBack, null, 0.04f, 0.04f, 0.96f, 0.96f, false);
+            }
+        }
+
         private void DrawPhaseTrack()
         {
-            DuelPhase[] phases =
+            Color phaseColor = GetPhaseColor(engine.Phase);
+            AddPanel(contentRoot, 0.025f, 0.465f, 0.195f, 0.565f, panelColor);
+            AddText(contentRoot, "TURN " + engine.TurnNumber,
+                0.03f, 0.52f, 0.19f, 0.56f, 12, accentColor, TextAnchor.MiddleCenter, true);
+            AddButton(contentRoot, CurrentPhaseLabel(), 0.03f, 0.472f, 0.19f, 0.518f,
+                Color.Lerp(phaseColor, Color.white, 0.12f), () =>
+                {
+                    if (!engine.IsHumanActionWindow || engine.ResponseWindowOpen || engine.SearchChoiceOpen)
+                        return;
+                    engine.AdvancePhase();
+                    ClearSelection();
+                    Render();
+                }, 12);
+        }
+
+        private string CurrentPhaseLabel()
+        {
+            switch (engine.Phase)
             {
-                DuelPhase.Draw, DuelPhase.Standby, DuelPhase.MainOne,
-                DuelPhase.Battle, DuelPhase.MainTwo, DuelPhase.End
-            };
-            string[] labels = { "DRAW", "STANDBY", "MAIN 1", "BATTLE", "MAIN 2", "END" };
-            float startX = 0.025f;
-            const float width = 0.15f;
-            const float gap = 0.01f;
-            int activeIndex = GetPhaseIndex(engine.Phase);
-            for (int i = 0; i < phases.Length; i++)
-            {
-                DuelPhase phase = phases[i];
-                float xMin = startX + i * (width + gap);
-                float xMax = xMin + width;
-                bool active = phase == engine.Phase;
-                Color phaseColor = GetPhaseColor(phase);
-                Color color = active
-                    ? Color.Lerp(phaseColor, Color.white, 0.18f)
-                    : i < activeIndex
-                        ? Color.Lerp(phaseColor, new Color(0.12f, 0.22f, 0.25f), 0.58f)
-                        : Color.Lerp(phaseColor, new Color(0.07f, 0.1f, 0.14f), 0.48f);
-                if (active)
-                    AddPanel(contentRoot, xMin - 0.004f, 0.511f, xMax + 0.004f, 0.564f,
-                        new Color(1f, 0.82f, 0.28f));
-                AddButton(contentRoot, labels[i], xMin, 0.515f, xMax, 0.56f, color,
-                    () =>
-                    {
-                        if (engine.AdvanceToPhase(phase))
-                        {
-                            ClearSelection();
-                            Render();
-                        }
-                    }, 12);
+                case DuelPhase.Draw: return "DRAW";
+                case DuelPhase.Standby: return "STANDBY";
+                case DuelPhase.MainOne: return "MAIN PHASE I";
+                case DuelPhase.Battle: return "BATTLE";
+                case DuelPhase.MainTwo: return "MAIN PHASE II";
+                case DuelPhase.End: return "END";
+                default: return engine.PhaseLabel.ToUpperInvariant();
             }
         }
 
@@ -1247,20 +1440,6 @@ namespace DuelPrototype
                 case DuelPhase.MainTwo: return new Color(0.5f, 0.58f, 0.2f);
                 case DuelPhase.End: return new Color(0.42f, 0.32f, 0.64f);
                 default: return new Color(0.14f, 0.2f, 0.28f);
-            }
-        }
-
-        private static int GetPhaseIndex(DuelPhase phase)
-        {
-            switch (phase)
-            {
-                case DuelPhase.Draw: return 0;
-                case DuelPhase.Standby: return 1;
-                case DuelPhase.MainOne: return 2;
-                case DuelPhase.Battle: return 3;
-                case DuelPhase.MainTwo: return 4;
-                case DuelPhase.End: return 5;
-                default: return -1;
             }
         }
 
@@ -1310,7 +1489,7 @@ namespace DuelPrototype
 
             RectTransform viewport = AddPanel(contentRoot, 0.2f, 0.24f, 0.57f, 0.67f, backgroundColor);
             viewport.gameObject.AddComponent<Mask>().showMaskGraphic = true;
-            ScrollRect scroll = viewport.gameObject.AddComponent<WheelScrollRect>();
+            WheelScrollRect scroll = viewport.gameObject.AddComponent<WheelScrollRect>();
             scroll.horizontal = false;
             scroll.vertical = true;
             scroll.movementType = ScrollRect.MovementType.Clamped;
@@ -1443,9 +1622,12 @@ namespace DuelPrototype
         private void DrawFieldSpellSlot(CardInstance card, bool opponent)
         {
             float xMin = opponent ? OpponentDeckX : 0.205f;
-            float yMin = opponent ? 0.59f : 0.35f;
-            AddText(contentRoot, "FIELD", xMin, opponent ? 0.73f : 0.17f, xMin + BoardCardWidth,
-                opponent ? 0.75f : 0.19f, 9, mutedColor, TextAnchor.MiddleCenter, true);
+            float yMin = GetFieldSpellZoneY(opponent);
+            float labelY = screen == ScreenMode.AiLab
+                ? (opponent ? 0.73f : 0.17f)
+                : yMin + BoardCardHeight + 0.002f;
+            AddText(contentRoot, "FIELD", xMin, labelY, xMin + BoardCardWidth,
+                labelY + 0.02f, 9, mutedColor, TextAnchor.MiddleCenter, true);
             RectTransform slot = AddButton(contentRoot, card == null ? "FIELD\nSLOT" : CardLabel(card, opponent),
                 xMin, yMin, xMin + BoardCardWidth, yMin + BoardCardHeight,
                 card == null ? new Color(0.09f, 0.13f, 0.18f) :
@@ -1519,6 +1701,11 @@ namespace DuelPrototype
             RectTransform button = AddButton(contentRoot, "DECK\n" + owner.DeckCount,
                 xMin, yMin, xMin + BoardCardWidth, yMin + BoardCardHeight,
                 new Color(0.12f, 0.2f, 0.32f), () => OpenDeck(owner), 9);
+            if (screen == ScreenMode.Duel && engine != null && owner == engine.Human)
+            {
+                RightClickAction rightClick = button.gameObject.AddComponent<RightClickAction>();
+                rightClick.OnRightClick = OpenForfeitConfirmation;
+            }
             AddCardArtPlaceholder(button, null, 0.06f, 0.06f, 0.94f, 0.94f, false);
         }
 
@@ -1563,7 +1750,7 @@ namespace DuelPrototype
                 .ToList();
             RectTransform viewport = AddPanel(contentRoot, 0.12f, 0.17f, 0.49f, 0.79f, backgroundColor);
             viewport.gameObject.AddComponent<Mask>().showMaskGraphic = true;
-            ScrollRect scroll = viewport.gameObject.AddComponent<WheelScrollRect>();
+            WheelScrollRect scroll = viewport.gameObject.AddComponent<WheelScrollRect>();
             scroll.horizontal = false;
             scroll.vertical = true;
             scroll.movementType = ScrollRect.MovementType.Clamped;
@@ -1577,7 +1764,7 @@ namespace DuelPrototype
             list.sizeDelta = new Vector2(0, remainingCards.Count * rowPixelHeight);
             scroll.content = list;
             scroll.viewport = viewport;
-            scroll.verticalScrollbar = CreateVerticalScrollbar(0.495f, 0.17f, 0.515f, 0.79f);
+            scroll.verticalScrollbar = CreateVerticalScrollbar(0.501f, 0.17f, 0.508f, 0.79f);
             scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
             scroll.verticalNormalizedPosition = deckScrollPosition;
             scroll.onValueChanged.AddListener(_ => deckScrollPosition = scroll.verticalNormalizedPosition);
@@ -2180,8 +2367,6 @@ namespace DuelPrototype
                 AddText(contentRoot, notice, 0.025f, 0.005f, 0.98f, 0.035f, 12, new Color(1f, 0.78f, 0.35f), TextAnchor.MiddleLeft);
                 return;
             }
-            string log = string.Join("\n", engine.Messages.Reverse().Take(3).Reverse());
-            AddText(contentRoot, log, 0.025f, 0.005f, 0.98f, 0.035f, 11, mutedColor, TextAnchor.MiddleLeft);
         }
 
         private void DrawDuelResultsOverlay()
@@ -2235,9 +2420,26 @@ namespace DuelPrototype
 
             AddButton(contentRoot, "REMATCH", 0.34f, 0.105f, 0.66f, 0.19f, accentColor, () =>
             {
-                StartDuel();
-                Render();
+                StartDuelFromMenu();
             }, 20);
+        }
+
+        private void DrawForfeitConfirmationOverlay()
+        {
+            AddPanel(contentRoot, 0, 0, 1, 1, new Color(0.01f, 0.02f, 0.035f, 0.78f));
+            AddPanel(contentRoot, 0.3f, 0.35f, 0.7f, 0.65f, panelColor);
+            AddText(contentRoot, "FORFEIT DUEL?", 0.33f, 0.56f, 0.67f, 0.62f,
+                22, Color.white, TextAnchor.MiddleCenter, true);
+            AddText(contentRoot, "Are you sure you want to forfeit this match?",
+                0.33f, 0.49f, 0.67f, 0.55f, 14, mutedColor, TextAnchor.MiddleCenter);
+            AddButton(contentRoot, "FORFEIT", 0.36f, 0.39f, 0.49f, 0.46f,
+                new Color(0.55f, 0.2f, 0.22f), ForfeitDuel, 13);
+            AddButton(contentRoot, "CANCEL", 0.51f, 0.39f, 0.64f, 0.46f,
+                new Color(0.2f, 0.34f, 0.46f), () =>
+                {
+                    forfeitConfirmOpen = false;
+                    Render();
+                }, 13);
         }
 
         private string PhasePrompt()
@@ -2355,9 +2557,9 @@ namespace DuelPrototype
             AddText(contentRoot, mainCount + " main  •  " + extraCount + " extra",
                 0.27f, 0.775f, 0.385f, 0.81f, 11, mutedColor, TextAnchor.MiddleRight);
 
-            RectTransform deckViewport = AddPanel(contentRoot, 0.05f, 0.15f, 0.39f, 0.76f, backgroundColor);
+            RectTransform deckViewport = AddPanel(contentRoot, 0.05f, 0.15f, 0.385f, 0.76f, backgroundColor);
             deckViewport.gameObject.AddComponent<Mask>().showMaskGraphic = true;
-            ScrollRect deckScroll = deckViewport.gameObject.AddComponent<WheelScrollRect>();
+            WheelScrollRect deckScroll = deckViewport.gameObject.AddComponent<WheelScrollRect>();
             deckScroll.horizontal = false;
             deckScroll.vertical = true;
             deckScroll.movementType = ScrollRect.MovementType.Clamped;
@@ -2379,6 +2581,8 @@ namespace DuelPrototype
             deckList.sizeDelta = new Vector2(0, deckCards.Count * deckRowHeight);
             deckScroll.content = deckList;
             deckScroll.viewport = deckViewport;
+            deckScroll.verticalScrollbar = CreateVerticalScrollbar(0.39f, 0.15f, 0.397f, 0.76f);
+            deckScroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
             for (int i = 0; i < deckCards.Count; i++)
                 AddDeckListRow(deckList, deckCards[i], i, deckRowHeight);
             if (deckCards.Count == 0)
@@ -2387,15 +2591,21 @@ namespace DuelPrototype
 
             AddText(contentRoot, "CARD LIBRARY", 0.435f, 0.775f, 0.68f, 0.81f,
                 17, Color.white, TextAnchor.MiddleLeft, true);
-            AddText(contentRoot, "Hover a card to preview it. Use + to add a copy.",
-                0.435f, 0.745f, 0.965f, 0.78f, 11, mutedColor, TextAnchor.MiddleLeft);
+            AddText(contentRoot, "Scroll to load the next page. Hover cards to preview.",
+                0.51f, 0.775f, 0.975f, 0.815f, 11, mutedColor, TextAnchor.MiddleCenter);
             AddDeckSearchField(0.435f, 0.695f, 0.685f, 0.74f);
             AddButton(contentRoot, CardLibraryFilterLabel(cardLibraryFilter) + "  ▼",
                 0.695f, 0.695f, 0.855f, 0.74f, CardFilterColor(cardLibraryFilter),
                 () => { cardFilterOptionsOpen = !cardFilterOptionsOpen; Render(); }, 11);
             AddButton(contentRoot, "SORT: " + DeckSortLabel(),
                 0.865f, 0.695f, 0.965f, 0.74f, new Color(0.2f, 0.34f, 0.46f),
-                () => { deckSortMode = (deckSortMode + 1) % 4; Render(); }, 10);
+                () =>
+                {
+                    deckSortMode = (deckSortMode + 1) % 4;
+                    deckLibraryPage = 0;
+                    deckLibraryScrollPosition = 1f;
+                    Render();
+                }, 10);
 
             List<CardDefinition> libraryCards = StarterCatalog.All
                 .Where(card => card != null && !string.IsNullOrWhiteSpace(card.CardId))
@@ -2411,13 +2621,24 @@ namespace DuelPrototype
                 (deckLibraryPage + 1) + "/" + deckPageCount + " pages",
                 0.77f, 0.75f, 0.965f, 0.78f, 11, mutedColor, TextAnchor.MiddleRight);
 
-            RectTransform libraryViewport = AddPanel(contentRoot, 0.435f, 0.18f, 0.965f, 0.68f, backgroundColor);
+            RectTransform libraryViewport = AddPanel(contentRoot, 0.435f, 0.18f, 0.95f, 0.68f, backgroundColor);
             libraryViewport.gameObject.AddComponent<Mask>().showMaskGraphic = true;
-            ScrollRect libraryScroll = libraryViewport.gameObject.AddComponent<WheelScrollRect>();
+            WheelScrollRect libraryScroll = libraryViewport.gameObject.AddComponent<WheelScrollRect>();
             libraryScroll.horizontal = false;
             libraryScroll.vertical = true;
             libraryScroll.movementType = ScrollRect.MovementType.Clamped;
             ConfigureMouseWheelScrolling(libraryScroll);
+            libraryScroll.PageBoundaryScrolled = direction =>
+            {
+                int nextPage = deckLibraryPage + direction;
+                if (nextPage < 0 || nextPage >= deckPageCount)
+                    return;
+                deckLibraryPage = nextPage;
+                deckLibraryScrollPosition = direction > 0 ? 1f : 0f;
+                Render();
+            };
+            libraryScroll.onValueChanged.AddListener(_ =>
+                deckLibraryScrollPosition = libraryScroll.verticalNormalizedPosition);
             const float libraryRowHeight = 54f;
             List<CardDefinition> visibleLibraryCards = libraryCards
                 .Skip(deckLibraryPage * LibraryPageSize)
@@ -2430,8 +2651,11 @@ namespace DuelPrototype
             libraryList.sizeDelta = new Vector2(0, visibleLibraryCards.Count * libraryRowHeight);
             libraryScroll.content = libraryList;
             libraryScroll.viewport = libraryViewport;
+            libraryScroll.verticalScrollbar = CreateVerticalScrollbar(0.955f, 0.18f, 0.963f, 0.68f);
+            libraryScroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
             for (int i = 0; i < visibleLibraryCards.Count; i++)
                 AddDeckLibraryRow(libraryList, visibleLibraryCards[i], i, libraryRowHeight);
+            libraryScroll.verticalNormalizedPosition = deckLibraryScrollPosition;
             if (libraryCards.Count == 0)
                 AddText(contentRoot, "No cards match these filters.", 0.46f, 0.4f, 0.94f, 0.48f,
                     15, mutedColor, TextAnchor.MiddleCenter);
@@ -2439,7 +2663,8 @@ namespace DuelPrototype
             AddButton(contentRoot, "<", 0.435f, 0.125f, 0.49f, 0.165f,
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
-                    deckLibraryPage--;
+                    deckLibraryPage = Mathf.Max(0, deckLibraryPage - 1);
+                    deckLibraryScrollPosition = 0f;
                     Render();
                 }, 12);
             AddText(contentRoot, "PAGE " + (deckLibraryPage + 1) + " / " + deckPageCount,
@@ -2447,7 +2672,8 @@ namespace DuelPrototype
             AddButton(contentRoot, ">", 0.91f, 0.125f, 0.965f, 0.165f,
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
-                    deckLibraryPage++;
+                    deckLibraryPage = Mathf.Min(deckPageCount - 1, deckLibraryPage + 1);
+                    deckLibraryScrollPosition = 1f;
                     Render();
                 }, 12);
 
@@ -2469,6 +2695,9 @@ namespace DuelPrototype
             row.pivot = new Vector2(0.5f, 1);
             row.sizeDelta = new Vector2(-8f, rowHeight - 3f);
             row.anchoredPosition = new Vector2(0, top);
+            WheelScrollRect scroll = parent.GetComponentInParent<WheelScrollRect>();
+            if (scroll != null)
+                AttachScrollWheelForwarder(row.gameObject, scroll);
             AttachCardHover(row, card);
             string kind = card.IsExtraDeckCard ? "EXTRA" : CardTypeLabel(card);
             AddText(row, card.DisplayName + "\n" + kind + "  •  " + count + " copy/copies",
@@ -2489,6 +2718,9 @@ namespace DuelPrototype
             row.pivot = new Vector2(0.5f, 1);
             row.sizeDelta = new Vector2(-8f, rowHeight - 3f);
             row.anchoredPosition = new Vector2(0, top);
+            WheelScrollRect scroll = parent.GetComponentInParent<WheelScrollRect>();
+            if (scroll != null)
+                AttachScrollWheelForwarder(row.gameObject, scroll);
             AttachCardHover(row, card);
             string details = card.IsMonster
                 ? CardTypeLabel(card) + "  •  " + card.Level + "  •  " +
@@ -2501,6 +2733,26 @@ namespace DuelPrototype
         }
 
         private void AddDeckSearchField(float xMin, float yMin, float xMax, float yMax)
+        {
+            AddCatalogSearchField(xMin, yMin, xMax, yMax, deckSearchQuery, "Search card names...", value =>
+            {
+                if (deckSearchQuery == value)
+                    return;
+                deckSearchQuery = value;
+                deckLibraryPage = 0;
+                deckLibraryScrollPosition = 1f;
+                StartCoroutine(RefreshCatalogAfterInput());
+            });
+        }
+
+        private void AddCatalogSearchField(
+            float xMin,
+            float yMin,
+            float xMax,
+            float yMax,
+            string query,
+            string placeholderText,
+            Action<string> onQueryChanged)
         {
             RectTransform root = AddPanel(contentRoot, xMin, yMin, xMax, yMax, new Color(0.1f, 0.14f, 0.19f));
             InputField input = root.gameObject.AddComponent<InputField>();
@@ -2523,18 +2775,19 @@ namespace DuelPrototype
             placeholder.font = font;
             placeholder.fontSize = 12;
             placeholder.color = mutedColor;
-            placeholder.text = "Search card names...";
+            placeholder.text = placeholderText;
             placeholder.alignment = TextAnchor.MiddleLeft;
             placeholder.raycastTarget = false;
             input.placeholder = placeholder;
-            input.text = deckSearchQuery;
-            input.onEndEdit.AddListener(value =>
-            {
-                if (deckSearchQuery == value)
-                    return;
-                deckSearchQuery = value;
+            input.text = query;
+            input.onEndEdit.AddListener(value => onQueryChanged(value));
+        }
+
+        private IEnumerator RefreshCatalogAfterInput()
+        {
+            yield return null;
+            if (screen == ScreenMode.Deck || screen == ScreenMode.Cards)
                 Render();
-            });
         }
 
         private void DrawDeckFilterOptions()
@@ -2555,6 +2808,8 @@ namespace DuelPrototype
                     {
                         cardLibraryFilter = filter;
                         cardFilterOptionsOpen = false;
+                        deckLibraryPage = 0;
+                        deckLibraryScrollPosition = 1f;
                         Render();
                     }, 10);
             }
@@ -2614,6 +2869,7 @@ namespace DuelPrototype
                 .Where(card => card != null && !string.IsNullOrWhiteSpace(card.CardId))
                 .GroupBy(card => card.CardId)
                 .Select(group => group.Last())
+                .Where(MatchesCardLibrarySearch)
                 .Where(MatchesCardLibraryFilter)
                 .OrderBy(card => card.Kind)
                 .ThenBy(card => card.DisplayName)
@@ -2628,14 +2884,37 @@ namespace DuelPrototype
             AddButton(contentRoot, CardLibraryFilterLabel(cardLibraryFilter) + "  ▼",
                 0.51f, 0.84f, 0.975f, 0.89f, new Color(0.16f, 0.24f, 0.33f),
                 () => { cardFilterOptionsOpen = !cardFilterOptionsOpen; Render(); }, 13);
-            RectTransform viewport = AddPanel(contentRoot, 0.025f, 0.12f, 0.455f, 0.82f, panelColor);
+            AddCatalogSearchField(0.025f, 0.775f, 0.455f, 0.815f, cardLibrarySearchQuery,
+                "Search all card names...", value =>
+                {
+                    if (cardLibrarySearchQuery == value)
+                        return;
+                    cardLibrarySearchQuery = value;
+                    cardLibraryPage = 0;
+                    cardLibraryScrollPosition = 1f;
+                    StartCoroutine(RefreshCatalogAfterInput());
+                });
+            AddText(contentRoot, "Scroll at either end of the list to change pages.",
+                0.51f, 0.775f, 0.975f, 0.815f, 11, mutedColor, TextAnchor.MiddleCenter);
+            RectTransform viewport = AddPanel(contentRoot, 0.025f, 0.12f, 0.445f, 0.765f, panelColor);
             Mask mask = viewport.gameObject.AddComponent<Mask>();
             mask.showMaskGraphic = true;
-            ScrollRect scroll = viewport.gameObject.AddComponent<WheelScrollRect>();
+            WheelScrollRect scroll = viewport.gameObject.AddComponent<WheelScrollRect>();
             scroll.horizontal = false;
             scroll.vertical = true;
             scroll.movementType = ScrollRect.MovementType.Clamped;
             ConfigureMouseWheelScrolling(scroll);
+            scroll.PageBoundaryScrolled = direction =>
+            {
+                int nextPage = cardLibraryPage + direction;
+                if (nextPage < 0 || nextPage >= cardPageCount)
+                    return;
+                cardLibraryPage = nextPage;
+                cardLibraryScrollPosition = direction > 0 ? 1f : 0f;
+                Render();
+            };
+            scroll.onValueChanged.AddListener(_ =>
+                cardLibraryScrollPosition = scroll.verticalNormalizedPosition);
 
             List<CardDefinition> visibleCards = cards
                 .Skip(cardLibraryPage * LibraryPageSize)
@@ -2650,9 +2929,12 @@ namespace DuelPrototype
             listContent.sizeDelta = new Vector2(0, visibleCards.Count * rowHeight);
             scroll.content = listContent;
             scroll.viewport = viewport;
+            scroll.verticalScrollbar = CreateVerticalScrollbar(0.45f, 0.12f, 0.458f, 0.765f);
+            scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
 
             for (int i = 0; i < visibleCards.Count; i++)
                 AddCardLibraryRow(listContent, visibleCards[i], i, rowHeight);
+            scroll.verticalNormalizedPosition = cardLibraryScrollPosition;
 
             const float previewHeight = 0.7f;
             float previewWidth = GetPortraitWidth(previewHeight);
@@ -2685,7 +2967,8 @@ namespace DuelPrototype
             AddButton(contentRoot, "<", 0.31f, 0.075f, 0.37f, 0.11f,
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
-                    cardLibraryPage--;
+                    cardLibraryPage = Mathf.Max(0, cardLibraryPage - 1);
+                    cardLibraryScrollPosition = 0f;
                     Render();
                 }, 12);
             AddText(contentRoot, "PAGE " + (cardLibraryPage + 1) + " / " + cardPageCount,
@@ -2693,7 +2976,8 @@ namespace DuelPrototype
             AddButton(contentRoot, ">", 0.63f, 0.075f, 0.69f, 0.11f,
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
-                    cardLibraryPage++;
+                    cardLibraryPage = Mathf.Min(cardPageCount - 1, cardLibraryPage + 1);
+                    cardLibraryScrollPosition = 1f;
                     Render();
                 }, 12);
 
@@ -2725,6 +3009,12 @@ namespace DuelPrototype
                 case CardLibraryFilter.CounterTraps: return card.Kind == CardKind.Trap && card.Subtype == CardSubtype.Counter;
                 default: return true;
             }
+        }
+
+        private bool MatchesCardLibrarySearch(CardDefinition card)
+        {
+            return string.IsNullOrWhiteSpace(cardLibrarySearchQuery) ||
+                   card.DisplayName.IndexOf(cardLibrarySearchQuery.Trim(), StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private string CardLibraryFilterLabel(CardLibraryFilter filter)
@@ -2770,6 +3060,8 @@ namespace DuelPrototype
                     {
                         cardLibraryFilter = filter;
                         cardFilterOptionsOpen = false;
+                        cardLibraryPage = 0;
+                        cardLibraryScrollPosition = 1f;
                         Render();
                     }, 12);
             }
@@ -2809,6 +3101,9 @@ namespace DuelPrototype
             row.pivot = new Vector2(0.5f, 1);
             row.sizeDelta = new Vector2(-12, rowHeight - 4);
             row.anchoredPosition = new Vector2(0, -index * rowHeight);
+            WheelScrollRect scroll = parent.GetComponentInParent<WheelScrollRect>();
+            if (scroll != null)
+                AttachScrollWheelForwarder(row.gameObject, scroll);
 
             Image image = row.gameObject.AddComponent<Image>();
             image.color = CardFrameColor(card);
@@ -3009,6 +3304,7 @@ namespace DuelPrototype
             DrawSpellTrapRow(engine.Opponent.SpellTrapZones, 0.75f);
             DrawFieldSpellSlot(engine.Opponent.FieldSpellZone, true);
             DrawReadOnlyZones(engine.Opponent.MonsterZones, 0.59f);
+            DrawOpponentHandBacks();
 
             AddPanel(contentRoot, 0.025f, 0.55f, 0.975f, 0.59f, new Color(0.08f, 0.14f, 0.18f));
             string status = engine.Phase == DuelPhase.GameOver
@@ -3084,7 +3380,7 @@ namespace DuelPrototype
                     MatchesTestCardFilters(card, TestLabFilter.None))
                 .OrderBy(card => card.DisplayName, StringComparer.OrdinalIgnoreCase)
                 .ToList();
-            const int pageSize = 10;
+            const int pageSize = 20;
             int pageCount = Mathf.Max(1, Mathf.CeilToInt(candidates.Count / (float)pageSize));
             testCardPage = Mathf.Clamp(testCardPage, 0, pageCount - 1);
             List<CardDefinition> page = candidates.Skip(testCardPage * pageSize).Take(pageSize).ToList();
@@ -3104,19 +3400,43 @@ namespace DuelPrototype
             DrawTestFilterButton(TestLabFilter.FrameType, 0.025f, 0.695f, 0.17f, 0.74f);
             DrawTestFilterButton(TestLabFilter.Level, 0.18f, 0.695f, 0.325f, 0.74f);
             DrawTestFilterButton(TestLabFilter.CardSet, 0.335f, 0.695f, 0.475f, 0.74f);
-            AddText(contentRoot, candidates.Count + " matching cards  •  page " + (testCardPage + 1) +
-                " of " + pageCount, 0.025f, 0.66f, 0.475f, 0.69f, 10, mutedColor, TextAnchor.MiddleLeft);
+            AddText(contentRoot, candidates.Count + " matching cards  •  scroll to load more  •  page " +
+                (testCardPage + 1) + "/" + pageCount, 0.025f, 0.66f, 0.475f, 0.69f,
+                10, mutedColor, TextAnchor.MiddleLeft);
 
-            AddPanel(contentRoot, 0.025f, 0.17f, 0.475f, 0.65f, panelColor);
-            const float rowHeight = 0.045f;
+            RectTransform testListViewport = AddPanel(contentRoot, 0.025f, 0.17f, 0.475f, 0.65f, panelColor);
+            testListViewport.gameObject.AddComponent<Mask>().showMaskGraphic = true;
+            WheelScrollRect testListScroll = testListViewport.gameObject.AddComponent<WheelScrollRect>();
+            testListScroll.horizontal = false;
+            testListScroll.vertical = true;
+            testListScroll.movementType = ScrollRect.MovementType.Clamped;
+            ConfigureMouseWheelScrolling(testListScroll);
+            testListScroll.PageBoundaryScrolled = direction =>
+            {
+                int nextPage = testCardPage + direction;
+                if (nextPage < 0 || nextPage >= pageCount)
+                    return;
+                testCardPage = nextPage;
+                testCardScrollPosition = direction > 0 ? 1f : 0f;
+                Render();
+            };
+            testListScroll.onValueChanged.AddListener(_ =>
+                testCardScrollPosition = testListScroll.verticalNormalizedPosition);
+
+            const float rowHeight = 42f;
+            RectTransform testList = CreateRect("Test Card List", testListViewport);
+            testList.anchorMin = new Vector2(0f, 1f);
+            testList.anchorMax = new Vector2(1f, 1f);
+            testList.pivot = new Vector2(0.5f, 1f);
+            testList.sizeDelta = new Vector2(0f, page.Count * rowHeight);
+            testListScroll.content = testList;
+            testListScroll.viewport = testListViewport;
             for (int i = 0; i < page.Count; i++)
             {
                 CardDefinition card = page[i];
-                float top = 0.645f - i * rowHeight;
                 bool selected = selectedTestCard == card;
-                AddButton(contentRoot, card.DisplayName + "   •   " + CardTypeLabel(card) +
-                    "   •   " + TestEffectStatusLabel(card),
-                    0.035f, top - rowHeight + 0.002f, 0.465f, top - 0.002f,
+                AddScrollListButton(testList, card.DisplayName + "   •   " + CardTypeLabel(card) +
+                    "   •   " + TestEffectStatusLabel(card), i, rowHeight,
                     selected ? Color.Lerp(CardFrameColor(card), accentColor, 0.42f) : CardFrameColor(card),
                     () =>
                     {
@@ -3124,6 +3444,7 @@ namespace DuelPrototype
                         Render();
                     }, 10, card);
             }
+            testListScroll.verticalNormalizedPosition = testCardScrollPosition;
             if (page.Count == 0)
                 AddText(contentRoot, "No cards match these filters.", 0.06f, 0.43f, 0.44f, 0.5f,
                     15, mutedColor, TextAnchor.MiddleCenter);
@@ -3132,6 +3453,7 @@ namespace DuelPrototype
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
                     testCardPage = Mathf.Max(0, testCardPage - 1);
+                    testCardScrollPosition = 0f;
                     Render();
                 }, 12);
             AddText(contentRoot, "PAGE " + (testCardPage + 1) + " / " + pageCount,
@@ -3140,6 +3462,7 @@ namespace DuelPrototype
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
                     testCardPage = Mathf.Min(pageCount - 1, testCardPage + 1);
+                    testCardScrollPosition = 1f;
                     Render();
                 }, 12);
 
@@ -3317,6 +3640,7 @@ namespace DuelPrototype
             }
             openTestFilter = TestLabFilter.None;
             testCardPage = 0;
+            testCardScrollPosition = 1f;
             Render();
         }
 
@@ -3470,6 +3794,7 @@ namespace DuelPrototype
                     return;
                 testCardSearchQuery = value;
                 testCardPage = 0;
+                testCardScrollPosition = 1f;
                 StartCoroutine(RefreshTestSetupAfterInput());
             });
         }
@@ -3685,7 +4010,18 @@ namespace DuelPrototype
             button.pivot = new Vector2(0.5f, 1);
             button.sizeDelta = new Vector2(0, rowHeight - 2f);
             button.anchoredPosition = new Vector2(0, -index * rowHeight);
+            WheelScrollRect scroll = list.GetComponentInParent<WheelScrollRect>();
+            if (scroll != null)
+                AttachScrollWheelForwarder(button.gameObject, scroll);
             return button;
+        }
+
+        private static void AttachScrollWheelForwarder(GameObject target, WheelScrollRect scroll)
+        {
+            ScrollWheelForwarder forwarder = target.GetComponent<ScrollWheelForwarder>();
+            if (forwarder == null)
+                forwarder = target.AddComponent<ScrollWheelForwarder>();
+            forwarder.ScrollTarget = scroll;
         }
 
         private void BuyPack()

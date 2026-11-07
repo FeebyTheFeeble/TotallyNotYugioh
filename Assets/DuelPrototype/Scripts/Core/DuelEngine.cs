@@ -204,6 +204,8 @@ namespace DuelPrototype
 
         public DuelStateSnapshot CaptureState()
         {
+            if (Human == null || Opponent == null || CurrentPlayer == null)
+                throw new InvalidOperationException("Start a duel before capturing its state.");
             if (ResponseWindowOpen || ResponseDiscardChoiceOpen || SearchChoiceOpen ||
                 pendingAiActions.Count > 0)
                 throw new InvalidOperationException(
@@ -261,7 +263,7 @@ namespace DuelPrototype
             return snapshot;
         }
 
-        public static DuelEngine RestoreState(DuelStateSnapshot snapshot)
+        internal static DuelEngine RestoreState(DuelStateSnapshot snapshot)
         {
             Dictionary<string, CardInstance> cards = snapshot.cards.ToDictionary(
                 item => item.instanceId,

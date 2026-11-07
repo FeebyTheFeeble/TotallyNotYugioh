@@ -123,6 +123,15 @@ namespace DuelPrototype
                 player.positionChangesLockedTurnsRemaining < 0)
                 throw new FormatException(playerKey + " has an invalid negative turn counter.");
 
+            ValidateCardKinds(player.deck, cards, playerKey + " deck", definition => definition.CanBeMainDeck);
+            ValidateCardKinds(player.hand, cards, playerKey + " hand", definition => definition.CanBeMainDeck);
+            ValidateCardKinds(player.extraDeck, cards, playerKey + " extraDeck", definition => definition.CanBeExtraDeck);
+            ValidateCardKinds(player.monsterZones, cards, playerKey + " monsterZones", definition => definition.IsMonster);
+            ValidateCardKinds(player.spellTrapZones, cards, playerKey + " spellTrapZones",
+                definition => definition.Kind == CardKind.Spell || definition.Kind == CardKind.Trap);
+            ValidateCardKinds(new[] { player.fieldSpellZone }, cards, playerKey + " fieldSpellZone",
+                definition => definition.Kind == CardKind.Spell);
+
             IEnumerable<string> zoneReferences = player.deck
                 .Concat(player.hand)
                 .Concat(player.graveyard)
@@ -137,6 +146,22 @@ namespace DuelPrototype
                     throw new FormatException(playerKey + " references missing card instance " + instanceId + ".");
                 if (!locatedCards.Add(instanceId))
                     throw new FormatException("Card instance " + instanceId + " appears in more than one zone.");
+            }
+        }
+
+        private static void ValidateCardKinds(
+            IEnumerable<string> instanceIds,
+            Dictionary<string, DuelCardStateSnapshot> cards,
+            string zoneName,
+            Func<CardDefinition, bool> isAllowed)
+        {
+            foreach (string instanceId in instanceIds.Where(id => !string.IsNullOrEmpty(id)))
+            {
+                if (!cards.TryGetValue(instanceId, out DuelCardStateSnapshot card))
+                    continue;
+                CardDefinition definition = StarterCatalog.Find(card.cardId);
+                if (!isAllowed(definition))
+                    throw new FormatException("Card " + instanceId + " cannot be placed in " + zoneName + ".");
             }
         }
 
