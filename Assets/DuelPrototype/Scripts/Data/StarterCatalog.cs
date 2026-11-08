@@ -197,9 +197,9 @@ namespace DuelPrototype
             List<CardDefinition> extra = extraNames.Select(RequireCard).ToList();
             if (extra.Count > 15 || extra.Any(card => !card.CanBeExtraDeck))
                 throw new InvalidOperationException("Structure deck '" + name + "' has an invalid Extra Deck.");
-            if (main.GroupBy(card => card.CardId).Any(group => group.Count() > 3) ||
-                extra.GroupBy(card => card.CardId).Any(group => group.Count() > 3))
-                throw new InvalidOperationException("Structure deck '" + name + "' exceeds the three-copy limit.");
+            if (main.Concat(extra).GroupBy(card => card.CardId)
+                .Any(group => group.Count() > group.First().MaxDeckCopies))
+                throw new InvalidOperationException("Structure deck '" + name + "' exceeds a card's copy limit.");
 
             return new StructureDeckPreset(name, theme, main, extra);
         }

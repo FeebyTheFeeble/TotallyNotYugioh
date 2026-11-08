@@ -57,7 +57,79 @@ namespace DuelPrototype
         KnightsCombo,
         AttackTheMoon,
         DestroySpellTrap,
-        SanganSearch
+        SanganSearch,
+        SearchDeckToHand,
+        SendMonsterFromDeckToGraveyard,
+        DiscardDrawSameCount,
+        DrawThreeDiscardTwo,
+        DiscardOneDestroyFaceUpOpponentMonsters,
+        DestroyAllMonsters,
+        DestroyAllOpponentMonsters,
+        DestroyHighestDefenseMonster,
+        ReturnAllSpellTrapsToHand,
+        ReviveMonsterFromGraveyard,
+        BlackWhirlwindSearch,
+        BlackwingRevive,
+        BlackwingSpecialSummon,
+        BlackwingHalveMonster,
+        BlackwingBattleBoost,
+        BlackwingDeckSummon,
+        BlackwingSiroccoBoost,
+        BlackwingVayuSummon,
+        BlackwingMistral,
+        BlackwingShura,
+        BlackwingSilverwind,
+        BlackwingArmedWing,
+        BlackwingArmorMaster,
+        BlackRoseDragon,
+        ZephyrosRevive,
+        BookOfMoon,
+        CallOfTheHaunted,
+        ColossalFighterRevive,
+        CyberDragonSummon,
+        DebrisDragonRevive,
+        DekoichiDraw,
+        DestroySetOpponentBackrow,
+        Doppelwarrior,
+        DrillWarrior,
+        FormulaSynchronDraw,
+        GoyoGuardianRevive,
+        IcarusAttack,
+        JinzoTrapLock,
+        JunkConverter,
+        JunkSynchronRevive,
+        JunkWarriorBoost,
+        LevelEater,
+        AncientFairyDragon,
+        LifeStreamSetLifePoints,
+        LimiterRemoval,
+        MachineDuplication,
+        MajesticDragon,
+        MajesticStarDragon,
+        MorphtronicBoarden,
+        MorphtronicCelfon,
+        MorphtronicRemoten,
+        NitroWarrior,
+        OneForOne,
+        PotOfAvarice,
+        PowerToolDragon,
+        QuickdrawSynchron,
+        QuillboltHedgehog,
+        RedDragonArchfiend,
+        RoadSynchron,
+        SakuretsuArmor,
+        Scapegoat,
+        ScrapIronScarecrow,
+        ShootingStarDragon,
+        SolemnJudgment,
+        StardustDragon,
+        StardustXiaolong,
+        StarlightRoad,
+        SynchronExplorer,
+        TorrentialTribute,
+        Tuning,
+        TuningwareDraw,
+        TurboSynchron
     }
 
     [CreateAssetMenu(menuName = "Duel Prototype/Card", fileName = "NewCard")]
@@ -80,6 +152,10 @@ namespace DuelPrototype
         [SerializeField] private bool effectMonster;
         [SerializeField] private CardEffect effect;
         [SerializeField] private int effectValue;
+        [SerializeField] private string effectTargetMonsterType;
+        [SerializeField] private int effectTargetMaxLevel;
+        [SerializeField] private int effectTargetMaxAttack;
+        [SerializeField, Range(1, 3)] private int maxDeckCopies = 3;
         [SerializeField, TextArea(2, 5)] private string rulesSummary;
         [SerializeField, Range(1, 10)] private int packWeight = 8;
 
@@ -101,6 +177,10 @@ namespace DuelPrototype
             (effectMonster || effect != CardEffect.None);
         public CardEffect Effect => effect;
         public int EffectValue => effectValue;
+        public string EffectTargetMonsterType => effectTargetMonsterType;
+        public int EffectTargetMaxLevel => effectTargetMaxLevel;
+        public int EffectTargetMaxAttack => effectTargetMaxAttack;
+        public int MaxDeckCopies => maxDeckCopies;
         public string RulesSummary => rulesSummary;
         public int PackWeight => packWeight;
         public bool IsExtraDeckCard => kind == CardKind.Synchro || kind == CardKind.Fusion ||
@@ -108,9 +188,11 @@ namespace DuelPrototype
         public bool IsMonster => kind == CardKind.Monster || kind == CardKind.Synchro ||
             kind == CardKind.Fusion || kind == CardKind.Xyz || kind == CardKind.Link ||
             kind == CardKind.Token;
+        public bool IsRitualMonster => IsMonster &&
+            (string.Equals(frameType, "ritual", System.StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(frameType, "ritual_pendulum", System.StringComparison.OrdinalIgnoreCase));
         public bool CanNormalSummon => IsMonster && !IsExtraDeckCard && kind != CardKind.Token &&
-            !string.Equals(frameType, "ritual", System.StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(frameType, "ritual_pendulum", System.StringComparison.OrdinalIgnoreCase);
+            !IsRitualMonster;
         public bool CanBeMainDeck => !IsExtraDeckCard && kind != CardKind.Token && kind != CardKind.Skill;
         public bool CanBeExtraDeck => IsExtraDeckCard;
 
@@ -133,7 +215,11 @@ namespace DuelPrototype
             string cardFrameType = "",
             string cardAttackDisplay = null,
             string cardDefenseDisplay = null,
-            string cardSetNames = "")
+            string cardSetNames = "",
+            string targetMonsterType = "",
+            int targetMaxLevel = 0,
+            int targetMaxAttack = 0,
+            int maximumDeckCopies = 3)
         {
             cardId = id;
             displayName = name;
@@ -152,6 +238,10 @@ namespace DuelPrototype
             effectMonster = IsMonster && (isEffectMonster || cardEffect != CardEffect.None);
             effect = cardEffect;
             effectValue = Mathf.Max(0, value);
+            effectTargetMonsterType = targetMonsterType ?? "";
+            effectTargetMaxLevel = Mathf.Max(0, targetMaxLevel);
+            effectTargetMaxAttack = Mathf.Max(0, targetMaxAttack);
+            maxDeckCopies = Mathf.Clamp(maximumDeckCopies, 1, 3);
             rulesSummary = summary;
             packWeight = Mathf.Clamp(weight, 1, 10);
         }
@@ -162,6 +252,7 @@ namespace DuelPrototype
             attack = Mathf.Max(0, attack);
             defense = Mathf.Max(0, defense);
             effectValue = Mathf.Max(0, effectValue);
+            maxDeckCopies = Mathf.Clamp(maxDeckCopies, 1, 3);
             packWeight = Mathf.Clamp(packWeight, 1, 10);
             if (!IsMonster)
             {

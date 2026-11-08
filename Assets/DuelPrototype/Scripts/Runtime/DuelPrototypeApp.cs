@@ -60,11 +60,107 @@ namespace DuelPrototype
     public sealed class RightClickAction : MonoBehaviour, IPointerClickHandler
     {
         public Action OnRightClick;
+        public Action<PointerEventData> OnRightClickWithEventData;
 
         public void OnPointerClick(PointerEventData eventData)
         {
             if (eventData.button == PointerEventData.InputButton.Right)
+            {
                 OnRightClick?.Invoke();
+                OnRightClickWithEventData?.Invoke(eventData);
+            }
+        }
+    }
+
+    public sealed class DuelCardDragHandler : MonoBehaviour,
+        IBeginDragHandler, IDragHandler, IEndDragHandler, IDropHandler
+    {
+        public CardInstance Card;
+        public Func<CardInstance, bool> OnDropCard;
+        public Action<PointerEventData> OnBeginDragAction;
+        public Action<PointerEventData> OnDragAction;
+        public Action<PointerEventData> OnEndDragAction;
+
+        public void OnBeginDrag(PointerEventData eventData)
+        {
+            if (Card != null)
+                OnBeginDragAction?.Invoke(eventData);
+        }
+
+        public void OnDrag(PointerEventData eventData)
+        {
+            if (Card != null)
+                OnDragAction?.Invoke(eventData);
+        }
+
+        public void OnEndDrag(PointerEventData eventData)
+        {
+            if (Card != null)
+                OnEndDragAction?.Invoke(eventData);
+        }
+
+        public void OnDrop(PointerEventData eventData)
+        {
+            DuelCardDragHandler draggedCard = eventData.pointerDrag == null
+                ? null
+                : eventData.pointerDrag.GetComponent<DuelCardDragHandler>();
+            if (draggedCard != null && draggedCard.Card != null)
+                OnDropCard?.Invoke(draggedCard.Card);
+        }
+    }
+
+    public sealed class DuelHandCardVisual : MonoBehaviour
+    {
+        public CardInstance Card;
+    }
+
+    public static class DuelHandLayout
+    {
+        public const int MaxVisibleOpponentCards = 10;
+        public const float CardHeight = 0.112f;
+        public const float CardGap = 0.008f;
+        public const float MaxWidth = 0.68f;
+        public const float HumanHandBottom = 0.018f;
+        public const float OpponentHandBottom = 0.875f;
+
+        public static float GetCardWidth(int handCount, float screenAspect, bool opponent)
+        {
+            int visibleCount = GetVisibleCount(handCount, opponent);
+            float baseWidth = CardHeight * 5f / 7f / screenAspect;
+            float gap = GetCardGap(visibleCount);
+            return Mathf.Min(baseWidth, (MaxWidth - (visibleCount - 1) * gap) / visibleCount);
+        }
+
+        public static Vector2 GetCardCenter(int index, int handCount, float screenAspect, bool opponent)
+        {
+            int visibleCount = GetVisibleCount(handCount, opponent);
+            int visibleIndex = Mathf.Clamp(index, 0, visibleCount - 1);
+            float gap = GetCardGap(visibleCount);
+            float width = GetCardWidth(handCount, screenAspect, opponent);
+            float totalWidth = visibleCount * width + (visibleCount - 1) * gap;
+            float startX = (1f - totalWidth) * 0.5f;
+            float height = width * screenAspect * 7f / 5f;
+            float bottom = opponent ? OpponentHandBottom : HumanHandBottom;
+            return new Vector2(startX + visibleIndex * (width + gap) + width * 0.5f,
+                bottom + height * 0.5f);
+        }
+
+        private static int GetVisibleCount(int handCount, bool opponent)
+        {
+            return Mathf.Max(1, opponent ? Mathf.Min(handCount, MaxVisibleOpponentCards) : handCount);
+        }
+
+        private static float GetCardGap(int visibleCount)
+        {
+            return Mathf.Min(CardGap, MaxWidth / Mathf.Max(1, visibleCount - 1));
+        }
+    }
+
+    public static class DuelAttackLayout
+    {
+        public static Vector2 GetDirectAttackTarget(bool attackerIsOpponent)
+        {
+            return new Vector2(0.5f, attackerIsOpponent ? 0.24f : 0.76f);
         }
     }
 
@@ -103,6 +199,7 @@ namespace DuelPrototype
             public int Index;
             public int ContainerCount;
             public bool FaceUp;
+            public bool AttackPosition;
             public bool EffectUsedThisTurn;
         }
 
@@ -116,6 +213,14 @@ namespace DuelPrototype
             public bool ShowPopup;
             public bool StartsFaceUp;
             public bool EndsFaceUp;
+            public bool IsHandReflow;
+            public bool IsSummon;
+            public bool IsHandDeparture;
+            public bool IsDraw;
+            public bool IsTributeSummon;
+            public bool IsTributedCard;
+            public bool IsSet;
+            public int BatchId;
         }
 
         private sealed class AttackAnimation
@@ -123,6 +228,13 @@ namespace DuelPrototype
             public CardInstance Attacker;
             public Vector2 From;
             public Vector2 To;
+        }
+
+        private sealed class PhaseTickerMessage
+        {
+            public string Label;
+            public Color BackgroundColor;
+            public Color AccentColor;
         }
 
         [Serializable]
@@ -149,25 +261,18 @@ namespace DuelPrototype
         private const float OpponentMonsterY = 0.56f;
         private const float HumanMonsterY = 0.39f;
         private const float HumanSpellTrapY = 0.22f;
-        private const float HandCardHeight = 0.112f;
-        private const float HandCardGap = 0.008f;
-        private const float HandMaxWidth = 0.68f;
         private static DuelPrototypeApp instance;
 
         private readonly Color backgroundColor = new Color(0.035f, 0.055f, 0.085f);
         private readonly Color panelColor = new Color(0.075f, 0.105f, 0.15f);
         private readonly Color accentColor = new Color(0.15f, 0.76f, 0.72f);
         private readonly Color mutedColor = new Color(0.42f, 0.5f, 0.6f);
-        private readonly Dictionary<ScreenMode, Button> headerTabButtons = new Dictionary<ScreenMode, Button>();
-        private readonly Dictionary<ScreenMode, Image> headerTabBorders = new Dictionary<ScreenMode, Image>();
 
         private PlayerProfile profile;
         private DuelEngine engine;
         private MockDuelSimulator mockDuelSimulator;
         private Canvas canvas;
         private CanvasGroup canvasInputGroup;
-        private RectTransform headerRoot;
-        private Text creditsText;
         private RectTransform contentRoot;
         private RectTransform cardPreviewRoot;
         private Image cardPreviewBackground;
@@ -183,6 +288,7 @@ namespace DuelPrototype
         private Sprite cardBackCircleSprite;
         private ScreenMode screen = ScreenMode.Duel;
         private CardInstance selectedHandCard;
+        private CardInstance selectedRitualMonster;
         private CardInstance selectedMonsterCard;
         private CardInstance selectedAttacker;
         private CardInstance selectedTarget;
@@ -203,6 +309,13 @@ namespace DuelPrototype
         private Font font;
         private bool matchRewardGranted;
         private bool forfeitConfirmOpen;
+        private bool coinTossOpen;
+        private bool coinFlipInProgress;
+        private bool coinFlipResolved;
+        private bool playerCalledHeads;
+        private bool playerWonCoinFlip;
+        private string coinTossResult = "";
+        private Coroutine coinFlipRoutine;
         private int firstAiDeckIndex;
         private int secondAiDeckIndex = 1;
         private int deckPage;
@@ -217,6 +330,7 @@ namespace DuelPrototype
         private string cardLibrarySearchQuery = "";
         private CardDefinition selectedTestCard;
         private string testCardSearchQuery = "";
+        private bool showFailedUnitTests;
         private int testCardPage;
         private float testCardScrollPosition = 1f;
         private TestLabFilter openTestFilter;
@@ -230,11 +344,24 @@ namespace DuelPrototype
         private readonly List<RectTransform> contextActionButtons = new List<RectTransform>();
         private readonly Queue<CardMovementAnimation> cardAnimationQueue = new Queue<CardMovementAnimation>();
         private readonly Queue<AttackAnimation> attackAnimationQueue = new Queue<AttackAnimation>();
-        private readonly Queue<string> phaseTickerQueue = new Queue<string>();
+        private readonly Queue<PhaseTickerMessage> phaseTickerQueue = new Queue<PhaseTickerMessage>();
         private Action phaseTickerCompletion;
         private readonly Dictionary<CardInstance, CardVisualState> pendingDrawnCardStates =
             new Dictionary<CardInstance, CardVisualState>();
+        private readonly Dictionary<CardInstance, CardVisualState> pendingHandLayoutStarts =
+            new Dictionary<CardInstance, CardVisualState>();
+        private readonly Dictionary<CardInstance, HashSet<CardInstance>> pendingTributeSummons =
+            new Dictionary<CardInstance, HashSet<CardInstance>>();
+        private readonly HashSet<CardInstance> animatedHandCards = new HashSet<CardInstance>();
+        private readonly HashSet<CardInstance> animatingCardArrivals = new HashSet<CardInstance>();
         private Dictionary<CardInstance, CardVisualState> lastCardVisualStates;
+        private int cardVisualBatchId;
+        private CardInstance draggingHandCard;
+        private RectTransform draggedCardVisual;
+        private CanvasGroup draggedCardSourceGroup;
+        private bool dragDropHandled;
+        private CardInstance pendingTributeSummonCard;
+        private int pendingTributeSummonZone = -1;
         private DuelEngine observedEngine;
         private Coroutine cardAnimationRoutine;
         private Coroutine attackAnimationRoutine;
@@ -248,10 +375,9 @@ namespace DuelPrototype
         private bool aiHandsOpen;
         private bool aiAutoplay;
         private float nextAiStepTime;
-        private float headerRevealUntil;
-        private bool headerWasVisible = true;
-        private readonly float[] aiAutoplayPaces = { 5f, 10f, 15f };
-        private int aiAutoplayPaceIndex = 1;
+        private readonly float[] aiAutoplayPaces = { 0f, 5f, 10f, 15f };
+        private int aiAutoplayPaceIndex;
+        private const float AiCommandDelay = 0.35f;
         private float BoardCardHeight => GetPortraitHeight(BoardCardWidth);
         private float MonsterCardStepX
         {
@@ -292,16 +418,49 @@ namespace DuelPrototype
 
         private void Update()
         {
-            UpdateHeaderVisibility();
-            if (screen != ScreenMode.AiLab || !aiAutoplay || engine == null || engine.Phase == DuelPhase.GameOver ||
-                Time.unscaledTime < nextAiStepTime)
+            if (screen == ScreenMode.AiLab && engine != null && engine.IsAiVsAi &&
+                engine.Phase != DuelPhase.GameOver && Keyboard.current != null &&
+                Keyboard.current.spaceKey.wasPressedThisFrame)
+            {
+                aiAutoplay = !aiAutoplay;
+                nextAiStepTime = Time.unscaledTime + AiCommandDelay;
+                Render();
+            }
+
+            if (engine == null || engine.Phase == DuelPhase.GameOver)
                 return;
 
-            engine.StepAiTurn();
+            if ((screen == ScreenMode.Duel ||
+                 (screen == ScreenMode.TestLab && mockDuelSimulator != null)) &&
+                engine.IsHumanActionWindow && !engine.ResponseWindowOpen && !engine.SearchChoiceOpen &&
+                IsAutomaticHumanPhase() &&
+                !IsPresentationInProgress() && Time.unscaledTime >= nextAiStepTime)
+            {
+                engine.AdvancePhase();
+                nextAiStepTime = Time.unscaledTime + AiCommandDelay;
+                Render();
+                return;
+            }
+
+            bool playAiTurn = screen == ScreenMode.Duel &&
+                engine.CurrentPlayer != engine.Human && engine.HasPendingAiActions;
+            bool autoplayAiLab = screen == ScreenMode.AiLab && aiAutoplay && engine.IsAiVsAi;
+            if ((!playAiTurn && !autoplayAiLab) || engine.ResponseWindowOpen || engine.SearchChoiceOpen ||
+                IsPresentationInProgress() || Time.unscaledTime < nextAiStepTime)
+                return;
+
+            int previousTurn = engine.TurnNumber;
+            if (!engine.StepAiTurn())
+                return;
+
             if (engine.Phase == DuelPhase.GameOver)
                 aiAutoplay = false;
-            nextAiStepTime = Time.unscaledTime + aiAutoplayPaces[aiAutoplayPaceIndex];
+            float delay = AiCommandDelay;
+            if (screen == ScreenMode.AiLab && engine.TurnNumber != previousTurn)
+                delay += aiAutoplayPaces[aiAutoplayPaceIndex];
+            nextAiStepTime = Time.unscaledTime + delay;
             Render();
+            RefreshInputState();
         }
 
         private void LoadProfile()
@@ -310,14 +469,15 @@ namespace DuelPrototype
             profile = string.IsNullOrEmpty(json) ? null : JsonUtility.FromJson<PlayerProfile>(json);
             if (profile == null || profile.collection == null || profile.deck == null)
             {
-                profile = new PlayerProfile { credits = 500, catalogVersion = 3 };
+                profile = new PlayerProfile { credits = 500, catalogVersion = 4 };
                 AddPresetToProfile(StarterCatalog.StructureDecks[0]);
                 SaveProfile();
             }
-            else if (profile.catalogVersion < 3)
+            else if (profile.catalogVersion < 4)
             {
                 profile.deck.RemoveAll(id => StarterCatalog.Find(id) == null);
                 profile.collection.RemoveAll(item => item == null || StarterCatalog.Find(item.id) == null);
+                ClampDeckToCopyLimits();
                 int mainCount = profile.deck.Select(StarterCatalog.Find)
                     .Count(card => card != null && card.CanBeMainDeck);
                 if (mainCount < 20)
@@ -325,9 +485,25 @@ namespace DuelPrototype
                     profile.deck.Clear();
                     AddPresetToProfile(StarterCatalog.StructureDecks[0]);
                 }
-                profile.catalogVersion = 3;
+                profile.catalogVersion = 4;
                 SaveProfile();
             }
+        }
+
+        private void ClampDeckToCopyLimits()
+        {
+            Dictionary<string, int> copiesByCard = new Dictionary<string, int>(StringComparer.Ordinal);
+            profile.deck.RemoveAll(id =>
+            {
+                CardDefinition definition = StarterCatalog.Find(id);
+                if (definition == null)
+                    return true;
+                copiesByCard.TryGetValue(id, out int copies);
+                if (copies >= definition.MaxDeckCopies)
+                    return true;
+                copiesByCard[id] = copies + 1;
+                return false;
+            });
         }
 
         private void AddPresetToProfile(StructureDeckPreset preset)
@@ -345,7 +521,7 @@ namespace DuelPrototype
             PlayerPrefs.Save();
         }
 
-        private void StartDuel()
+        private void StartDuel(bool humanGoesFirst)
         {
             matchRewardGranted = false;
             notice = "";
@@ -358,29 +534,127 @@ namespace DuelPrototype
                 .Where(card => card != null)
                 .ToList();
             int mainCount = deck.Count(card => card.CanBeMainDeck);
-            if (mainCount < 20)
+            if (mainCount < 20 || !HasValidDeckCopyCounts(deck))
             {
-                notice = "Your Main Deck needs at least 20 cards. Restore it in Deck Builder to start a duel.";
+                notice = mainCount < 20
+                    ? "Your Main Deck needs at least 20 cards. Restore it in Deck Builder to start a duel."
+                    : "Your deck exceeds a card's copy limit. Correct it in Deck Builder before starting a duel.";
                 engine = null;
                 return;
             }
 
             engine = new DuelEngine();
-            engine.StartMatch(deck, StarterCatalog.CreateAiDeck());
+            BindEngineEvents(false);
+            engine.StartMatch(deck, StarterCatalog.CreateAiDeck(), humanGoesFirst: humanGoesFirst);
+            OnPhaseStarted(engine.Phase);
             ClearSelection();
         }
 
         private void StartDuelFromMenu()
         {
-            StartDuel();
-            if (engine == null)
+            List<CardDefinition> deck = profile.deck
+                .Select(StarterCatalog.Find)
+                .Where(card => card != null)
+                .ToList();
+            int mainCount = deck.Count(card => card.CanBeMainDeck);
+            if (mainCount < 20 || !HasValidDeckCopyCounts(deck))
             {
+                notice = mainCount < 20
+                    ? "Your Main Deck needs at least 20 cards. Restore it in Deck Builder to start a duel."
+                    : "Your deck exceeds a card's copy limit. Correct it in Deck Builder before starting a duel.";
+                engine = null;
                 Render();
                 return;
             }
 
-            QueuePhaseTicker("DUEL START");
+            engine = null;
+            coinTossOpen = true;
+            coinFlipInProgress = false;
+            coinFlipResolved = false;
+            coinTossResult = "";
+            notice = "";
+            ClearSelection();
             Render();
+        }
+
+        private void BeginDuelAfterCoinToss(bool humanGoesFirst)
+        {
+            coinTossOpen = false;
+            coinFlipInProgress = false;
+            coinFlipResolved = false;
+            coinFlipRoutine = null;
+            StartDuel(humanGoesFirst);
+            Render();
+        }
+
+        private void CallCoinSide(bool callHeads)
+        {
+            if (!coinTossOpen || coinFlipInProgress || coinFlipResolved)
+                return;
+
+            playerCalledHeads = callHeads;
+            coinFlipInProgress = true;
+            Render();
+            coinFlipRoutine = StartCoroutine(AnimateCoinFlip());
+        }
+
+        private IEnumerator AnimateCoinFlip()
+        {
+            RectTransform coin = CreateRect("Coin Flip Animation", (RectTransform)canvas.transform);
+            coin.anchorMin = new Vector2(0.5f, 0.5f);
+            coin.anchorMax = new Vector2(0.5f, 0.5f);
+            coin.anchoredPosition = Vector2.zero;
+            coin.sizeDelta = new Vector2(150f, 150f);
+            Image coinImage = coin.gameObject.AddComponent<Image>();
+            coinImage.color = new Color(0.88f, 0.65f, 0.16f);
+
+            RectTransform inner = CreateRect("Coin Face", coin);
+            SetAnchors(inner, 0.08f, 0.08f, 0.92f, 0.92f);
+            Image innerImage = inner.gameObject.AddComponent<Image>();
+            innerImage.color = new Color(0.96f, 0.78f, 0.31f);
+            RectTransform coinLetterRect = CreateRect("Coin Letter", coin);
+            SetAnchors(coinLetterRect, 0.1f, 0.1f, 0.9f, 0.9f);
+            Text coinLetter = coinLetterRect.gameObject.AddComponent<Text>();
+            coinLetter.font = font;
+            coinLetter.text = "H";
+            coinLetter.fontSize = 72;
+            coinLetter.color = new Color(0.28f, 0.2f, 0.08f);
+            coinLetter.alignment = TextAnchor.MiddleCenter;
+            coinLetter.fontStyle = FontStyle.Bold;
+            coinLetter.raycastTarget = false;
+            coin.SetAsLastSibling();
+
+            for (int flip = 0; flip < 18; flip++)
+            {
+                coinLetter.text = flip % 2 == 0 ? "H" : "T";
+                float scale = Mathf.Max(0.08f, Mathf.Abs(Mathf.Cos((flip + 1) * Mathf.PI * 0.5f)));
+                coin.localScale = new Vector3(scale, 1f, 1f);
+                yield return new WaitForSecondsRealtime(0.055f);
+            }
+
+            bool resultHeads = UnityEngine.Random.value < 0.5f;
+            coinLetter.text = resultHeads ? "H" : "T";
+            coin.localScale = Vector3.one;
+            yield return new WaitForSecondsRealtime(0.65f);
+            Destroy(coin.gameObject);
+
+            playerWonCoinFlip = resultHeads == playerCalledHeads;
+            coinFlipResolved = true;
+            if (playerWonCoinFlip)
+            {
+                coinTossResult = "You won the coin toss. Choose whether to go first or second.";
+                coinFlipInProgress = false;
+                coinFlipRoutine = null;
+                Render();
+                yield break;
+            }
+
+            bool aiGoesFirst = UnityEngine.Random.value < 0.5f;
+            coinTossResult = "CPU RIVAL won and chose to go " + (aiGoesFirst ? "first." : "second.");
+            Render();
+            yield return new WaitForSecondsRealtime(1.25f);
+            coinFlipInProgress = false;
+            BeginDuelAfterCoinToss(!aiGoesFirst);
         }
 
         private void ForfeitDuel()
@@ -389,7 +663,7 @@ namespace DuelPrototype
                 return;
 
             forfeitConfirmOpen = false;
-            Render(false);
+            Render();
             QueuePhaseTicker("FORFEIT", () =>
             {
                 engine = null;
@@ -415,13 +689,39 @@ namespace DuelPrototype
             Render();
         }
 
-        private void QueuePhaseTicker(string label, Action onComplete = null)
+        private void QueuePhaseTicker(
+            string label,
+            Action onComplete = null,
+            Color? backgroundColor = null,
+            Color? edgeColor = null)
         {
-            phaseTickerQueue.Enqueue(label);
+            phaseTickerQueue.Enqueue(new PhaseTickerMessage
+            {
+                Label = label,
+                BackgroundColor = backgroundColor ?? new Color(0.035f, 0.055f, 0.085f, 1f),
+                AccentColor = edgeColor ?? accentColor
+            });
             if (onComplete != null)
                 phaseTickerCompletion = onComplete;
-            if (phaseTickerRoutine == null)
+            TryStartNextPresentation();
+        }
+
+        private void TryStartNextPresentation()
+        {
+            if (cardAnimationRoutine != null || attackAnimationRoutine != null || phaseTickerRoutine != null)
+            {
+                RefreshInputState();
+                return;
+            }
+
+            if (cardAnimationQueue.Count > 0)
+                cardAnimationRoutine = StartCoroutine(PlayCardAnimations());
+            else if (attackAnimationQueue.Count > 0)
+                attackAnimationRoutine = StartCoroutine(PlayAttackAnimations());
+            else if (phaseTickerQueue.Count > 0)
                 phaseTickerRoutine = StartCoroutine(PlayPhaseTicker());
+
+            RefreshInputState();
         }
 
         private void StartAiMatch()
@@ -437,8 +737,8 @@ namespace DuelPrototype
             engine = new DuelEngine();
             engine.StartMatch(first.MainDeck.Concat(first.ExtraDeck).ToList(),
                 second.MainDeck.Concat(second.ExtraDeck).ToList(), true, first.Name, second.Name);
-            aiAutoplay = false;
-            nextAiStepTime = Time.unscaledTime;
+            aiAutoplay = true;
+            nextAiStepTime = Time.unscaledTime + AiCommandDelay;
             ClearSelection();
             screen = ScreenMode.AiLab;
             Render();
@@ -466,7 +766,6 @@ namespace DuelPrototype
 
             RectTransform root = canvasObject.GetComponent<RectTransform>();
             AddPanel(root, 0, 0, 1, 1, backgroundColor);
-            BuildHeader(root);
             contentRoot = CreateRect("Content", root);
             Stretch(contentRoot);
             BuildCardPreview(root);
@@ -515,91 +814,7 @@ namespace DuelPrototype
             if (artAspect != null)
                 artAspect.enabled = false;
             cardPreviewRoot.gameObject.SetActive(false);
-        }
-
-        private void BuildHeader(RectTransform root)
-        {
-            headerRoot = AddPanel(root, 0, 0.9f, 1, 1, new Color(0.055f, 0.08f, 0.12f));
-            RectTransform header = headerRoot;
-            AddText(header, "SYNCHRO / DUEL LAB", 0.025f, 0.22f, 0.32f, 0.78f, 27, accentColor, TextAnchor.MiddleLeft, true);
-            AddText(header, "A tactical card-dueling prototype", 0.025f, 0, 0.38f, 0.28f, 13, mutedColor, TextAnchor.MiddleLeft);
-            AddHeaderTab(header, ScreenMode.Duel, "DUEL", 0.34f, 0.42f, new Color(0.15f, 0.22f, 0.31f));
-            AddHeaderTab(header, ScreenMode.Deck, "DECK", 0.425f, 0.50f, new Color(0.15f, 0.22f, 0.31f));
-            AddHeaderTab(header, ScreenMode.Cards, "CARDS", 0.505f, 0.58f, new Color(0.15f, 0.22f, 0.31f));
-            AddHeaderTab(header, ScreenMode.Shop, "SHOP", 0.585f, 0.66f, new Color(0.15f, 0.22f, 0.31f));
-            AddHeaderTab(header, ScreenMode.AiLab, "AI LAB", 0.665f, 0.755f, new Color(0.36f, 0.23f, 0.5f));
-            AddHeaderTab(header, ScreenMode.TestLab, "UNIT TESTS", 0.76f, 0.89f, new Color(0.12f, 0.42f, 0.4f));
-            RectTransform creditsRect = CreateRect("Credits", header);
-            SetAnchors(creditsRect, 0.91f, 0.2f, 0.985f, 0.8f);
-            creditsText = creditsRect.gameObject.AddComponent<Text>();
-            creditsText.font = font;
-            creditsText.fontSize = 16;
-            creditsText.color = new Color(1f, 0.8f, 0.32f);
-            creditsText.alignment = TextAnchor.MiddleRight;
-            creditsText.fontStyle = FontStyle.Bold;
-            UpdateCreditsText();
-        }
-
-        private void UpdateHeaderVisibility()
-        {
-            if (headerRoot == null)
-                return;
-
-            bool duelScreen = screen == ScreenMode.Duel;
-            bool gameplayScreen = screen == ScreenMode.AiLab && engine != null ||
-                screen == ScreenMode.TestLab && mockDuelSimulator != null;
-            bool showHeader = !duelScreen && !gameplayScreen;
-            if (gameplayScreen && Mouse.current != null)
-            {
-                Vector2 pointerPosition = Mouse.current.position.ReadValue();
-                if (pointerPosition.y >= Screen.height - 3f)
-                    headerRevealUntil = Time.unscaledTime + 1.25f;
-                if (RectTransformUtility.RectangleContainsScreenPoint(headerRoot, pointerPosition, null))
-                    headerRevealUntil = Time.unscaledTime + 0.75f;
-                showHeader = Time.unscaledTime < headerRevealUntil;
-            }
-            else if (gameplayScreen)
-            {
-                showHeader = true;
-            }
-
-            if (showHeader != headerWasVisible)
-            {
-                headerWasVisible = showHeader;
-                if (showHeader)
-                    headerRoot.SetAsLastSibling();
-            }
-
-            float hiddenOffset = headerRoot.rect.height + 4f;
-            Vector2 target = showHeader ? Vector2.zero : new Vector2(0f, hiddenOffset);
-            headerRoot.anchoredPosition = Vector2.MoveTowards(
-                headerRoot.anchoredPosition, target, 1400f * Time.unscaledDeltaTime);
-        }
-
-        private void AddHeaderTab(RectTransform header, ScreenMode mode, string label, float xMin, float xMax, Color baseColor)
-        {
-            RectTransform border = AddPanel(header, xMin - 0.004f, 0.15f, xMax + 0.004f, 0.85f,
-                new Color(1f, 0.82f, 0.28f));
-            headerTabBorders[mode] = border.GetComponent<Image>();
-            RectTransform button = AddButton(header, label, xMin, 0.2f, xMax, 0.8f, baseColor,
-                () => SwitchScreen(mode), 13);
-            headerTabButtons[mode] = button.GetComponent<Button>();
-        }
-
-        private void UpdateHeaderTabSelection()
-        {
-            foreach (KeyValuePair<ScreenMode, Button> entry in headerTabButtons)
-            {
-                bool selected = entry.Key == screen;
-                entry.Value.targetGraphic.color = selected
-                    ? Color.Lerp(accentColor, Color.white, 0.08f)
-                    : entry.Key == ScreenMode.AiLab
-                        ? new Color(0.36f, 0.23f, 0.5f)
-                        : entry.Key == ScreenMode.TestLab
-                            ? new Color(0.12f, 0.42f, 0.4f)
-                        : new Color(0.15f, 0.22f, 0.31f);
-                headerTabBorders[entry.Key].enabled = selected;
-            }
+            cardPreviewRoot.gameObject.AddComponent<CanvasGroup>().blocksRaycasts = false;
         }
 
         private void SwitchScreen(ScreenMode mode)
@@ -631,18 +846,45 @@ namespace DuelPrototype
             Render();
         }
 
-        private void Render(bool advancePhases = true)
+        private void DrawBackToMainMenuButton()
+        {
+            string label = screen == ScreenMode.Duel && engine != null &&
+                engine.Phase != DuelPhase.GameOver
+                ? "FORFEIT"
+                : "← MAIN MENU";
+            AddButton(contentRoot, label, 0.85f, 0.925f, 0.98f, 0.98f,
+                new Color(0.15f, 0.22f, 0.31f), ReturnToMainMenu, 11);
+        }
+
+        private void ReturnToMainMenu()
+        {
+            if (screen == ScreenMode.Duel && engine != null &&
+                engine.Phase != DuelPhase.GameOver)
+            {
+                OpenForfeitConfirmation();
+                return;
+            }
+
+            if (screen == ScreenMode.Duel)
+            {
+                engine = null;
+                matchRewardGranted = false;
+                ClearSelection();
+                Render();
+                return;
+            }
+
+            SwitchScreen(ScreenMode.Duel);
+        }
+
+        private void Render()
         {
             if (contentRoot == null)
                 return;
             BindEngineEvents();
-            if (advancePhases)
-                AdvanceAutomaticPhases();
             TrackCardVisualChanges();
             HideCardPreview();
             AwardMatchIfNeeded();
-            UpdateCreditsText();
-            UpdateHeaderTabSelection();
             deckPreviewRoot = null;
             graveyardPreviewRoot = null;
             sanganPreviewRoot = null;
@@ -664,6 +906,8 @@ namespace DuelPrototype
             else
                 DrawAiLabScreen();
 
+            if (screen != ScreenMode.Duel || engine != null)
+                DrawBackToMainMenuButton();
             if (packRevealOpen && screen == ScreenMode.Shop)
                 DrawPackRevealOverlay();
             if (aiHandsOpen && screen == ScreenMode.AiLab && engine != null && engine.IsAiVsAi)
@@ -683,9 +927,12 @@ namespace DuelPrototype
                 DrawSanganSearchOverlay();
             if (forfeitConfirmOpen && screen == ScreenMode.Duel && engine != null)
                 DrawForfeitConfirmationOverlay();
+            if (pendingTributeSummonCard != null && screen == ScreenMode.Duel && engine != null)
+                DrawTributeSelectionOverlay();
+            RefreshInputState();
         }
 
-        private void BindEngineEvents()
+        private void BindEngineEvents(bool showCurrentPhase = true)
         {
             if (observedEngine == engine)
                 return;
@@ -695,46 +942,31 @@ namespace DuelPrototype
                 observedEngine.PhaseChanged -= OnPhaseStarted;
                 observedEngine.AttackDeclared -= OnAttackDeclared;
                 observedEngine.CardDrawn -= OnCardDrawn;
+                observedEngine.TributeSummoned -= OnTributeSummoned;
             }
 
             observedEngine = engine;
             lastCardVisualStates = null;
             pendingDrawnCardStates.Clear();
+            pendingHandLayoutStarts.Clear();
+            pendingTributeSummons.Clear();
+            animatedHandCards.Clear();
+            animatingCardArrivals.Clear();
             if (observedEngine == null)
                 return;
 
             observedEngine.PhaseChanged += OnPhaseStarted;
             observedEngine.AttackDeclared += OnAttackDeclared;
             observedEngine.CardDrawn += OnCardDrawn;
-            OnPhaseStarted(observedEngine.Phase);
+            observedEngine.TributeSummoned += OnTributeSummoned;
+            if (showCurrentPhase)
+                OnPhaseStarted(observedEngine.Phase);
         }
 
-        private void AdvanceAutomaticPhases()
+        private bool IsAutomaticHumanPhase()
         {
-            bool duelIsVisible = screen == ScreenMode.Duel ||
-                (screen == ScreenMode.TestLab && mockDuelSimulator != null);
-            if (engine == null || !duelIsVisible)
-                return;
-
-            for (int advances = 0; advances < 16; advances++)
-            {
-                if (!engine.IsHumanActionWindow || engine.ResponseWindowOpen || engine.SearchChoiceOpen)
-                    return;
-
-                if (engine.Phase == DuelPhase.Draw || engine.Phase == DuelPhase.Standby)
-                {
-                    engine.AdvancePhase();
-                    continue;
-                }
-
-                if (engine.Phase == DuelPhase.End && !HasEndPhaseAction())
-                {
-                    engine.AdvancePhase();
-                    continue;
-                }
-
-                return;
-            }
+            return engine.Phase == DuelPhase.Draw || engine.Phase == DuelPhase.Standby ||
+                   (engine.Phase == DuelPhase.End && !HasEndPhaseAction());
         }
 
         private bool HasEndPhaseAction()
@@ -745,6 +977,26 @@ namespace DuelPrototype
                 card.Definition.Effect != CardEffect.None);
         }
 
+        private bool IsPresentationInProgress()
+        {
+            return cardAnimationRoutine != null || cardAnimationQueue.Count > 0 ||
+                   attackAnimationRoutine != null || attackAnimationQueue.Count > 0 ||
+                   phaseTickerRoutine != null || phaseTickerQueue.Count > 0;
+        }
+
+        private void RefreshInputState()
+        {
+            if (canvasInputGroup == null)
+                return;
+
+            bool aiTurnInProgress = screen == ScreenMode.Duel && engine != null &&
+                engine.CurrentPlayer != engine.Human && engine.HasPendingAiActions &&
+                !engine.ResponseWindowOpen && !engine.SearchChoiceOpen;
+            canvasInputGroup.interactable = !IsPresentationInProgress() && !aiTurnInProgress &&
+                                            !coinFlipInProgress;
+            canvasInputGroup.blocksRaycasts = true;
+        }
+
         private void TrackCardVisualChanges()
         {
             if (engine == null)
@@ -753,25 +1005,36 @@ namespace DuelPrototype
                 return;
             }
 
+            int batchId = ++cardVisualBatchId;
             Dictionary<CardInstance, CardVisualState> currentStates = CaptureCardVisualStates();
-            if (lastCardVisualStates != null)
+            if (lastCardVisualStates != null || pendingHandLayoutStarts.Count > 0)
             {
                 foreach (KeyValuePair<CardInstance, CardVisualState> entry in currentStates)
                 {
-                    if (!lastCardVisualStates.TryGetValue(entry.Key, out CardVisualState previous))
+                    CardInstance card = entry.Key;
+                    CardVisualState previous = null;
+                    bool hasPrevious = lastCardVisualStates != null &&
+                        lastCardVisualStates.TryGetValue(card, out previous);
+                    bool isDraw = pendingDrawnCardStates.TryGetValue(card, out CardVisualState drawnState);
+                    if (!hasPrevious && !pendingHandLayoutStarts.TryGetValue(card, out previous) && !isDraw)
                         continue;
 
-                    CardInstance card = entry.Key;
                     CardVisualState current = entry.Value;
                     CardVisualState movementStart = previous;
-                    if (pendingDrawnCardStates.TryGetValue(card, out CardVisualState drawnState))
+                    if (isDraw && current.Zone != CardVisualZone.Hand)
                     {
-                        if (current.Zone == CardVisualZone.Hand)
-                            continue;
                         movementStart = drawnState;
                     }
+                    else if (isDraw && (movementStart == null || movementStart.Zone != CardVisualZone.Deck))
+                        movementStart = CreateDeckVisualState(drawnState.Owner);
+                    if (movementStart == null)
+                        continue;
 
                     bool zoneChanged = movementStart.Zone != current.Zone || movementStart.Owner != current.Owner;
+                    bool handLayoutChanged = movementStart.Zone == CardVisualZone.Hand &&
+                        current.Zone == CardVisualZone.Hand && movementStart.Owner == current.Owner &&
+                        (movementStart.Index != current.Index ||
+                         movementStart.ContainerCount != current.ContainerCount);
                     bool effectStarted = !movementStart.EffectUsedThisTurn && current.EffectUsedThisTurn;
                     bool activatedFromHand = movementStart.Zone == CardVisualZone.Hand &&
                         (card.Definition.Kind == CardKind.Spell || card.Definition.Kind == CardKind.Trap) &&
@@ -782,10 +1045,16 @@ namespace DuelPrototype
                         movementStart.Zone == CardVisualZone.SpellTrap && !movementStart.FaceUp &&
                         (current.FaceUp || current.Zone == CardVisualZone.Graveyard);
                     bool revealed = !CardIsVisible(movementStart) && CardIsVisible(current);
-                    bool showPopup = effectStarted || activatedFromHand || revealedTrap;
-                    if (!zoneChanged && !showPopup && !revealed)
+                    bool isSet = zoneChanged && current.Zone == CardVisualZone.Monster &&
+                        !current.FaceUp && !current.AttackPosition &&
+                        card.SummonedTurnNumber == engine.TurnNumber;
+                    bool showPopup = !isSet && (effectStarted || activatedFromHand || revealedTrap);
+                    if (!zoneChanged && !showPopup && !revealed && !handLayoutChanged)
                         continue;
 
+                    if (zoneChanged && IsBoardZone(current.Zone))
+                        animatingCardArrivals.Add(card);
+                    bool isTributeSummon = pendingTributeSummons.ContainsKey(card);
                     QueueCardAnimation(new CardMovementAnimation
                     {
                         Card = card,
@@ -795,13 +1064,39 @@ namespace DuelPrototype
                         EndSize = GetCardVisualSize(current),
                         ShowPopup = showPopup,
                         StartsFaceUp = CardIsVisible(movementStart),
-                        EndsFaceUp = CardIsVisible(current)
+                        EndsFaceUp = CardIsVisible(current),
+                        IsHandReflow = handLayoutChanged,
+                        IsHandDeparture = zoneChanged && movementStart.Zone == CardVisualZone.Hand &&
+                                          current.Zone != CardVisualZone.Hand,
+                        IsDraw = isDraw && current.Zone == CardVisualZone.Hand,
+                        IsTributeSummon = isTributeSummon,
+                        IsTributedCard = pendingTributeSummons.Values.Any(materials =>
+                            materials.Contains(card)),
+                        IsSet = isSet,
+                        BatchId = batchId,
+                        IsSummon = zoneChanged && current.Zone == CardVisualZone.Monster &&
+                                   current.FaceUp &&
+                                   card.SummonedTurnNumber == engine.TurnNumber
                     });
                 }
             }
 
             pendingDrawnCardStates.Clear();
+            pendingHandLayoutStarts.Clear();
+            pendingTributeSummons.Clear();
             lastCardVisualStates = currentStates;
+        }
+
+        private CardVisualState CreateDeckVisualState(DuelPlayer owner)
+        {
+            return new CardVisualState
+            {
+                Owner = owner,
+                Zone = CardVisualZone.Deck,
+                Index = 0,
+                ContainerCount = owner.Deck.Count + 1,
+                FaceUp = false
+            };
         }
 
         private Dictionary<CardInstance, CardVisualState> CaptureCardVisualStates()
@@ -862,17 +1157,29 @@ namespace DuelPrototype
                 Index = index,
                 ContainerCount = count,
                 FaceUp = card.FaceUp,
+                AttackPosition = card.AttackPosition,
                 EffectUsedThisTurn = card.EffectUsedThisTurn
             };
         }
 
-        private static bool CardIsVisible(CardVisualState state)
+        private bool CardIsVisible(CardVisualState state)
         {
             if (state.Zone == CardVisualZone.Deck || state.Zone == CardVisualZone.ExtraDeck ||
-                (state.Owner.IsAi && state.Zone == CardVisualZone.Hand))
+                (state.Owner.IsAi && state.Zone == CardVisualZone.Hand &&
+                 !(screen == ScreenMode.AiLab && engine != null && engine.IsAiVsAi)))
                 return false;
+            if (state.Zone == CardVisualZone.Hand &&
+                screen == ScreenMode.AiLab && engine != null && engine.IsAiVsAi)
+                return true;
             return state.Zone == CardVisualZone.Graveyard || state.Zone == CardVisualZone.Banished ||
                    state.FaceUp;
+        }
+
+        private static bool IsBoardZone(CardVisualZone zone)
+        {
+            return zone == CardVisualZone.Monster ||
+                   zone == CardVisualZone.SpellTrap ||
+                   zone == CardVisualZone.FieldSpell;
         }
 
         private Vector2 GetCardVisualPosition(CardVisualState state)
@@ -880,14 +1187,8 @@ namespace DuelPrototype
             switch (state.Zone)
             {
                 case CardVisualZone.Hand:
-                    float baseWidth = GetPortraitWidth(HandCardHeight);
-                    float gap = Math.Min(HandCardGap, HandMaxWidth / Math.Max(1, state.ContainerCount - 1));
-                    float width = Math.Min(baseWidth,
-                        (HandMaxWidth - (state.ContainerCount - 1) * gap) / state.ContainerCount);
-                    float start = (1f - (state.ContainerCount * width +
-                        (state.ContainerCount - 1) * gap)) * 0.5f;
-                    return new Vector2(start + state.Index * (width + gap) + width * 0.5f,
-                        0.018f + GetPortraitHeight(width) * 0.5f);
+                    return DuelHandLayout.GetCardCenter(state.Index, state.ContainerCount,
+                        GetScreenAspectRatio(), state.Owner == engine.Opponent);
                 case CardVisualZone.Monster:
                     return new Vector2(MonsterCardStartX + state.Index * MonsterCardStepX + BoardCardWidth * 0.5f,
                         GetMonsterZoneY(state.Owner) + BoardCardHeight * 0.5f);
@@ -925,22 +1226,16 @@ namespace DuelPrototype
 
         private float GetMonsterZoneY(DuelPlayer owner)
         {
-            if (screen == ScreenMode.AiLab)
-                return owner == engine.Opponent ? 0.59f : 0.35f;
             return owner == engine.Opponent ? OpponentMonsterY : HumanMonsterY;
         }
 
         private float GetSpellTrapZoneY(DuelPlayer owner)
         {
-            if (screen == ScreenMode.AiLab)
-                return owner == engine.Opponent ? 0.75f : 0.19f;
             return owner == engine.Opponent ? OpponentSpellTrapY : HumanSpellTrapY;
         }
 
         private float GetFieldSpellZoneY(bool opponent)
         {
-            if (screen == ScreenMode.AiLab)
-                return opponent ? 0.59f : 0.35f;
             return opponent ? OpponentMonsterY : HumanMonsterY;
         }
 
@@ -949,10 +1244,9 @@ namespace DuelPrototype
             Rect canvasRect = ((RectTransform)canvas.transform).rect;
             if (state.Zone == CardVisualZone.Hand)
             {
-                float baseWidth = GetPortraitWidth(HandCardHeight);
-                float gap = Math.Min(HandCardGap, HandMaxWidth / Math.Max(1, state.ContainerCount - 1));
-                float width = Math.Min(baseWidth,
-                    (HandMaxWidth - (state.ContainerCount - 1) * gap) / state.ContainerCount);
+                bool opponent = state.Owner == engine.Opponent;
+                float width = DuelHandLayout.GetCardWidth(state.ContainerCount,
+                    GetScreenAspectRatio(), opponent);
                 return new Vector2(width * canvasRect.width, GetPortraitHeight(width) * canvasRect.height);
             }
             return new Vector2(BoardCardWidth * canvasRect.width, BoardCardHeight * canvasRect.height);
@@ -963,8 +1257,7 @@ namespace DuelPrototype
             if (canvas == null)
                 return;
             cardAnimationQueue.Enqueue(animation);
-            if (cardAnimationRoutine == null)
-                cardAnimationRoutine = StartCoroutine(PlayCardAnimations());
+            TryStartNextPresentation();
         }
 
         private void OnCardDrawn(DuelPlayer owner, CardInstance card)
@@ -972,18 +1265,28 @@ namespace DuelPrototype
             if (owner == null || card == null)
                 return;
 
-            CardVisualState deckState = lastCardVisualStates != null &&
-                lastCardVisualStates.TryGetValue(card, out CardVisualState previous) &&
-                previous.Zone == CardVisualZone.Deck
-                ? previous
-                : new CardVisualState
+            if (lastCardVisualStates == null)
+            {
+                int previousHandCount = owner.Hand.Count - 1;
+                for (int i = 0; i < previousHandCount; i++)
                 {
-                    Owner = owner,
-                    Zone = CardVisualZone.Deck,
-                    Index = 0,
-                    ContainerCount = owner.Deck.Count + 1,
-                    FaceUp = false
-                };
+                    CardInstance handCard = owner.Hand[i];
+                    if (!pendingHandLayoutStarts.ContainsKey(handCard))
+                    {
+                        pendingHandLayoutStarts[handCard] = new CardVisualState
+                        {
+                            Owner = owner,
+                            Zone = CardVisualZone.Hand,
+                            Index = i,
+                            ContainerCount = previousHandCount,
+                            FaceUp = handCard.FaceUp,
+                            AttackPosition = handCard.AttackPosition,
+                            EffectUsedThisTurn = handCard.EffectUsedThisTurn
+                        };
+                    }
+                }
+            }
+
             CardVisualState handState = new CardVisualState
             {
                 Owner = owner,
@@ -991,54 +1294,531 @@ namespace DuelPrototype
                 Index = owner.Hand.IndexOf(card),
                 ContainerCount = owner.Hand.Count,
                 FaceUp = card.FaceUp,
+                AttackPosition = card.AttackPosition,
                 EffectUsedThisTurn = card.EffectUsedThisTurn
             };
             pendingDrawnCardStates[card] = handState;
-            QueueCardAnimation(new CardMovementAnimation
-            {
-                Card = card,
-                From = GetCardVisualPosition(deckState),
-                To = GetCardVisualPosition(handState),
-                StartSize = GetCardVisualSize(deckState),
-                EndSize = GetCardVisualSize(handState),
-                StartsFaceUp = false,
-                EndsFaceUp = CardIsVisible(handState)
-            });
+            if (canvas != null)
+                animatedHandCards.Add(card);
+        }
+
+        private void OnTributeSummoned(
+            DuelPlayer owner, CardInstance summonedCard, IReadOnlyList<CardInstance> tributes)
+        {
+            if (owner == null || summonedCard == null || tributes == null || tributes.Count == 0)
+                return;
+            pendingTributeSummons[summonedCard] = new HashSet<CardInstance>(tributes);
         }
 
         private IEnumerator PlayCardAnimations()
         {
+            yield return null;
             while (cardAnimationQueue.Count > 0)
             {
                 CardMovementAnimation animation = cardAnimationQueue.Dequeue();
-                RectTransform visual = CreateAnimatedCard(animation.Card.Definition,
-                    animation.StartsFaceUp, animation.From, animation.StartSize);
-                if (animation.ShowPopup)
+                bool coordinatedBatch = animation.BatchId != 0 &&
+                    (animation.IsDraw || animation.IsHandDeparture || animation.IsTributeSummon ||
+                     cardAnimationQueue.Any(item => item.BatchId == animation.BatchId &&
+                         (item.IsDraw || item.IsHandDeparture || item.IsTributeSummon)));
+                if (coordinatedBatch)
                 {
-                    yield return TweenCardVisual(visual, animation.From, new Vector2(0.5f, 0.5f),
-                        animation.StartSize, new Vector2(190f, 266f), 0.3f);
-                    if (!animation.StartsFaceUp)
-                        yield return FlipAnimatedCard(visual, true);
-                    yield return new WaitForSecondsRealtime(0.8f);
-                    yield return TweenCardVisual(visual, new Vector2(0.5f, 0.5f), animation.To,
-                        new Vector2(190f, 266f), animation.EndSize, 0.3f);
-                }
-                else
-                {
-                    yield return TweenCardVisual(visual, animation.From, animation.To,
-                        animation.StartSize, animation.EndSize, 0.42f);
-                    if (animation.StartsFaceUp != animation.EndsFaceUp)
-                        yield return FlipAnimatedCard(visual, animation.EndsFaceUp);
+                    List<CardMovementAnimation> batch = new List<CardMovementAnimation> { animation };
+                    int queuedCount = cardAnimationQueue.Count;
+                    Queue<CardMovementAnimation> laterAnimations = new Queue<CardMovementAnimation>();
+                    for (int i = 0; i < queuedCount; i++)
+                    {
+                        CardMovementAnimation queued = cardAnimationQueue.Dequeue();
+                        if (queued.BatchId == animation.BatchId)
+                            batch.Add(queued);
+                        else
+                            laterAnimations.Enqueue(queued);
+                    }
+                    while (laterAnimations.Count > 0)
+                        cardAnimationQueue.Enqueue(laterAnimations.Dequeue());
+
+                    List<CardMovementAnimation> handReflow = batch
+                        .Where(item => item.IsHandReflow)
+                        .ToList();
+                    CardMovementAnimation tributeSummon = batch.FirstOrDefault(item =>
+                        item.IsTributeSummon);
+                    if (tributeSummon != null)
+                    {
+                        yield return PlayTributeSummonAnimation(tributeSummon, batch, handReflow);
+                        foreach (CardMovementAnimation other in batch.Where(item =>
+                                     item != tributeSummon && !item.IsTributedCard &&
+                                     !item.IsHandReflow))
+                            yield return PlaySingleCardAnimation(other);
+                    }
+                    else if (batch.Any(item => item.IsDraw))
+                    {
+                        yield return PlayDrawArrivalAnimations(
+                            batch.Where(item => item.IsDraw).ToList(), handReflow);
+                        foreach (CardMovementAnimation other in batch.Where(item =>
+                                     !item.IsDraw && !item.IsHandReflow))
+                        {
+                            if (other.IsHandDeparture)
+                                yield return PlayHandDepartureAnimation(other, new List<CardMovementAnimation>());
+                            else
+                                yield return PlaySingleCardAnimation(other);
+                        }
+                    }
+                    else
+                    {
+                        CardMovementAnimation playedCard = batch.First(item => item.IsHandDeparture);
+                        yield return PlayHandDepartureAnimation(playedCard, handReflow);
+                        foreach (CardMovementAnimation other in batch.Where(item =>
+                                     item != playedCard && !item.IsHandReflow))
+                            yield return PlaySingleCardAnimation(other);
+                    }
+                    continue;
                 }
 
-                yield return TweenCardVisual(visual, animation.To, animation.To,
-                    animation.EndSize, animation.EndSize * 1.08f, 0.07f);
-                yield return TweenCardVisual(visual, animation.To, animation.To,
-                    animation.EndSize * 1.08f, animation.EndSize, 0.09f);
-                Destroy(visual.gameObject);
+                if (animation.IsHandReflow)
+                {
+                    List<CardMovementAnimation> reflowGroup = new List<CardMovementAnimation> { animation };
+                    while (cardAnimationQueue.Count > 0 && cardAnimationQueue.Peek().IsHandReflow)
+                        reflowGroup.Add(cardAnimationQueue.Dequeue());
+
+                    yield return PlayHandReflowAnimation(reflowGroup, 0.34f);
+                    continue;
+                }
+
+                yield return PlaySingleCardAnimation(animation);
             }
 
             cardAnimationRoutine = null;
+            if (animatedHandCards.Count > 0)
+            {
+                animatedHandCards.Clear();
+                Render();
+            }
+            if (animatingCardArrivals.Count > 0)
+            {
+                animatingCardArrivals.Clear();
+                Render();
+            }
+            TryStartNextPresentation();
+        }
+
+        private IEnumerator PlayHandDepartureAnimation(
+            CardMovementAnimation playedCard,
+            List<CardMovementAnimation> handReflow,
+            bool showSummonPulse = true)
+        {
+            List<RectTransform> reflowVisuals = handReflow
+                .Select(item => FindHandCardVisual(item.Card))
+                .ToList();
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(reflowVisuals[i], handReflow[i].From, handReflow[i].StartSize);
+
+            if (playedCard.IsSummon && showSummonPulse)
+                yield return PlaySummonPulse(playedCard.To);
+
+            RectTransform playedVisual = CreateAnimatedCard(playedCard.Card.Definition,
+                playedCard.IsSet ? false : playedCard.StartsFaceUp,
+                playedCard.From, playedCard.StartSize);
+            if (playedCard.ShowPopup && !playedCard.IsSet)
+            {
+                yield return TweenCardAndHand(playedVisual, playedCard.From,
+                    new Vector2(0.5f, 0.5f), playedCard.StartSize, new Vector2(190f, 266f),
+                    handReflow, reflowVisuals, 0.3f);
+                if (!playedCard.StartsFaceUp)
+                    yield return FlipAnimatedCard(playedVisual, true);
+                yield return new WaitForSecondsRealtime(0.8f);
+                yield return TweenCardVisual(playedVisual, new Vector2(0.5f, 0.5f), playedCard.To,
+                    new Vector2(190f, 266f), playedCard.EndSize, 0.3f);
+            }
+            else if (playedCard.IsSet)
+            {
+                yield return TweenSetCardAndHand(playedVisual, playedCard, handReflow,
+                    reflowVisuals, 0.42f);
+            }
+            else
+            {
+                yield return TweenCardAndHand(playedVisual, playedCard.From, playedCard.To,
+                    playedCard.StartSize, playedCard.EndSize, handReflow, reflowVisuals, 0.42f);
+            }
+
+            SetAnimatedCardPosition(playedVisual, playedCard.To);
+            playedVisual.sizeDelta = playedCard.EndSize;
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(reflowVisuals[i], handReflow[i].To, handReflow[i].EndSize);
+            if (playedCard.IsSet)
+                playedVisual.localRotation = Quaternion.Euler(0f, 0f, 90f);
+            else if (!playedCard.ShowPopup && playedCard.StartsFaceUp != playedCard.EndsFaceUp)
+                yield return FlipAnimatedCard(playedVisual, playedCard.EndsFaceUp);
+            yield return TweenCardVisual(playedVisual, playedCard.To, playedCard.To,
+                playedCard.EndSize, playedCard.EndSize * 1.08f, 0.07f);
+            yield return TweenCardVisual(playedVisual, playedCard.To, playedCard.To,
+                playedCard.EndSize * 1.08f, playedCard.EndSize, 0.09f);
+
+            Destroy(playedVisual.gameObject);
+            CompleteCardArrival(playedCard.Card);
+        }
+
+        private IEnumerator TweenSetCardAndHand(
+            RectTransform card,
+            CardMovementAnimation setCard,
+            List<CardMovementAnimation> handReflow,
+            List<RectTransform> handVisuals,
+            float duration)
+        {
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float progress = Mathf.Clamp01(elapsed / duration);
+                float eased = progress * progress * (3f - 2f * progress);
+                SetAnimatedCardPosition(card, Vector2.Lerp(setCard.From, setCard.To, eased));
+                card.sizeDelta = Vector2.Lerp(setCard.StartSize, setCard.EndSize, eased);
+                card.localRotation = Quaternion.Euler(0f, 0f, Mathf.Lerp(0f, 90f, eased));
+                for (int i = 0; i < handReflow.Count; i++)
+                {
+                    CardMovementAnimation item = handReflow[i];
+                    SetCardVisualRect(handVisuals[i],
+                        Vector2.Lerp(item.From, item.To, eased),
+                        Vector2.Lerp(item.StartSize, item.EndSize, eased));
+                }
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            SetAnimatedCardPosition(card, setCard.To);
+            card.sizeDelta = setCard.EndSize;
+            card.localRotation = Quaternion.Euler(0f, 0f, 90f);
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(handVisuals[i], handReflow[i].To, handReflow[i].EndSize);
+        }
+
+        private IEnumerator PlayDrawArrivalAnimations(
+            List<CardMovementAnimation> drawnCards,
+            List<CardMovementAnimation> handReflow)
+        {
+            List<RectTransform> drawVisuals = drawnCards.Select(item =>
+                CreateAnimatedCard(item.Card.Definition, item.StartsFaceUp, item.From, item.StartSize))
+                .ToList();
+            List<RectTransform> handVisuals = handReflow
+                .Select(item => FindHandCardVisual(item.Card))
+                .ToList();
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(handVisuals[i], handReflow[i].From, handReflow[i].StartSize);
+
+            const float duration = 0.48f;
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float progress = Mathf.Clamp01(elapsed / duration);
+                float eased = progress * progress * (3f - 2f * progress);
+                for (int i = 0; i < drawnCards.Count; i++)
+                {
+                    CardMovementAnimation item = drawnCards[i];
+                    SetAnimatedCardPosition(drawVisuals[i], Vector2.Lerp(item.From, item.To, eased));
+                    drawVisuals[i].sizeDelta = Vector2.Lerp(item.StartSize, item.EndSize, eased);
+                }
+                for (int i = 0; i < handReflow.Count; i++)
+                {
+                    CardMovementAnimation item = handReflow[i];
+                    SetCardVisualRect(handVisuals[i],
+                        Vector2.Lerp(item.From, item.To, eased),
+                        Vector2.Lerp(item.StartSize, item.EndSize, eased));
+                }
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            for (int i = 0; i < drawnCards.Count; i++)
+            {
+                CardMovementAnimation item = drawnCards[i];
+                SetAnimatedCardPosition(drawVisuals[i], item.To);
+                drawVisuals[i].sizeDelta = item.EndSize;
+            }
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(handVisuals[i], handReflow[i].To, handReflow[i].EndSize);
+
+            for (int i = 0; i < drawnCards.Count; i++)
+            {
+                CardMovementAnimation item = drawnCards[i];
+                if (item.StartsFaceUp != item.EndsFaceUp)
+                    yield return FlipAnimatedCard(drawVisuals[i], item.EndsFaceUp);
+                yield return TweenCardVisual(drawVisuals[i], item.To, item.To,
+                    item.EndSize, item.EndSize * 1.08f, 0.07f);
+                yield return TweenCardVisual(drawVisuals[i], item.To, item.To,
+                    item.EndSize * 1.08f, item.EndSize, 0.09f);
+                Destroy(drawVisuals[i].gameObject);
+            }
+        }
+
+        private IEnumerator PlayTributeSummonAnimation(
+            CardMovementAnimation summonedCard,
+            List<CardMovementAnimation> batch,
+            List<CardMovementAnimation> handReflow)
+        {
+            List<RectTransform> handVisuals = handReflow
+                .Select(item => FindHandCardVisual(item.Card))
+                .ToList();
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(handVisuals[i], handReflow[i].From, handReflow[i].StartSize);
+
+            List<CardMovementAnimation> tributes = batch
+                .Where(item => item.IsTributedCard)
+                .ToList();
+            if (tributes.Count > 0)
+            {
+                yield return PlayTributeDeathPulses(tributes);
+                List<RectTransform> tributeVisuals = tributes.Select(item =>
+                    CreateAnimatedCard(item.Card.Definition, item.StartsFaceUp, item.From, item.StartSize))
+                    .ToList();
+                yield return TweenCardGroup(tributeVisuals, tributes, 0.28f);
+                foreach (RectTransform visual in tributeVisuals)
+                    Destroy(visual.gameObject);
+            }
+
+            yield return PlaySummonPulse(summonedCard.To, new Color(1f, 0.68f, 0.2f, 1f));
+            if (summonedCard.IsHandDeparture)
+                yield return PlayHandDepartureAnimation(summonedCard, handReflow, false);
+            else
+                yield return PlaySingleCardAnimation(summonedCard, false);
+        }
+
+        private IEnumerator TweenCardGroup(
+            List<RectTransform> visuals,
+            List<CardMovementAnimation> animations,
+            float duration)
+        {
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float progress = Mathf.Clamp01(elapsed / duration);
+                float eased = progress * progress * (3f - 2f * progress);
+                for (int i = 0; i < animations.Count; i++)
+                {
+                    CardMovementAnimation item = animations[i];
+                    SetAnimatedCardPosition(visuals[i], Vector2.Lerp(item.From, item.To, eased));
+                    visuals[i].sizeDelta = Vector2.Lerp(item.StartSize, item.EndSize, eased);
+                }
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+            for (int i = 0; i < animations.Count; i++)
+            {
+                SetAnimatedCardPosition(visuals[i], animations[i].To);
+                visuals[i].sizeDelta = animations[i].EndSize;
+            }
+        }
+
+        private IEnumerator PlayTributeDeathPulses(List<CardMovementAnimation> tributes)
+        {
+            List<RectTransform> rings = new List<RectTransform>();
+            List<Image> images = new List<Image>();
+            List<float> endScales = new List<float>();
+            foreach (CardMovementAnimation tribute in tributes)
+            {
+                CreateTributeDeathRing(tribute.From, 150f, 1.2f,
+                    new Color(1f, 0.18f, 0.12f, 0.92f), rings, images, endScales);
+                CreateTributeDeathRing(tribute.From, 104f, 0.92f,
+                    new Color(1f, 0.62f, 0.18f, 0.9f), rings, images, endScales);
+            }
+
+            const float duration = 0.36f;
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float progress = Mathf.Clamp01(elapsed / duration);
+                float eased = progress * progress * (3f - 2f * progress);
+                for (int i = 0; i < rings.Count; i++)
+                {
+                    rings[i].localScale = Vector3.one * Mathf.Lerp(0.18f, endScales[i], eased);
+                    Color color = i % 2 == 0
+                        ? new Color(1f, 0.18f, 0.12f, 0.92f * (1f - progress))
+                        : new Color(1f, 0.62f, 0.18f, 0.9f * (1f - progress));
+                    images[i].color = color;
+                }
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+            foreach (RectTransform ring in rings)
+                Destroy(ring.gameObject);
+        }
+
+        private void CreateTributeDeathRing(
+            Vector2 position,
+            float size,
+            float endScale,
+            Color color,
+            List<RectTransform> rings,
+            List<Image> images,
+            List<float> endScales)
+        {
+            RectTransform ring = CreateRect("Tribute Death Ring", (RectTransform)canvas.transform);
+            ring.anchorMin = new Vector2(0.5f, 0.5f);
+            ring.anchorMax = new Vector2(0.5f, 0.5f);
+            ring.sizeDelta = new Vector2(size, size);
+            ring.localScale = Vector3.one * 0.18f;
+            SetAnimatedCardPosition(ring, position);
+            Image image = ring.gameObject.AddComponent<Image>();
+            image.sprite = GetCardBackCircleSprite();
+            image.color = color;
+            image.raycastTarget = false;
+            ring.SetAsLastSibling();
+            rings.Add(ring);
+            images.Add(image);
+            endScales.Add(endScale);
+        }
+
+        private IEnumerator PlayHandReflowAnimation(
+            List<CardMovementAnimation> handReflow,
+            float duration)
+        {
+            List<RectTransform> visuals = handReflow.Select(item => FindHandCardVisual(item.Card)).ToList();
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(visuals[i], handReflow[i].From, handReflow[i].StartSize);
+
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float progress = Mathf.Clamp01(elapsed / duration);
+                float eased = progress * progress * (3f - 2f * progress);
+                for (int i = 0; i < handReflow.Count; i++)
+                {
+                    CardMovementAnimation item = handReflow[i];
+                    SetCardVisualRect(visuals[i],
+                        Vector2.Lerp(item.From, item.To, eased),
+                        Vector2.Lerp(item.StartSize, item.EndSize, eased));
+                }
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(visuals[i], handReflow[i].To, handReflow[i].EndSize);
+        }
+
+        private IEnumerator TweenCardAndHand(
+            RectTransform card,
+            Vector2 from,
+            Vector2 to,
+            Vector2 startSize,
+            Vector2 endSize,
+            List<CardMovementAnimation> handReflow,
+            List<RectTransform> handVisuals,
+            float duration)
+        {
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float progress = Mathf.Clamp01(elapsed / duration);
+                float eased = progress * progress * (3f - 2f * progress);
+                SetAnimatedCardPosition(card, Vector2.Lerp(from, to, eased));
+                card.sizeDelta = Vector2.Lerp(startSize, endSize, eased);
+                for (int i = 0; i < handReflow.Count; i++)
+                {
+                    CardMovementAnimation item = handReflow[i];
+                    SetCardVisualRect(handVisuals[i],
+                        Vector2.Lerp(item.From, item.To, eased),
+                        Vector2.Lerp(item.StartSize, item.EndSize, eased));
+                }
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            SetAnimatedCardPosition(card, to);
+            card.sizeDelta = endSize;
+            for (int i = 0; i < handReflow.Count; i++)
+                SetCardVisualRect(handVisuals[i], handReflow[i].To, handReflow[i].EndSize);
+        }
+
+        private RectTransform FindHandCardVisual(CardInstance card)
+        {
+            foreach (DuelHandCardVisual handVisual in contentRoot.GetComponentsInChildren<DuelHandCardVisual>(true))
+                if (handVisual.Card == card)
+                    return (RectTransform)handVisual.transform;
+            return null;
+        }
+
+        private void SetCardVisualRect(RectTransform visual, Vector2 center, Vector2 size)
+        {
+            if (visual == null)
+                return;
+            Rect canvasRect = ((RectTransform)canvas.transform).rect;
+            float width = size.x / canvasRect.width;
+            float height = size.y / canvasRect.height;
+            SetAnchors(visual, center.x - width * 0.5f, center.y - height * 0.5f,
+                center.x + width * 0.5f, center.y + height * 0.5f);
+        }
+
+        private IEnumerator PlaySingleCardAnimation(
+            CardMovementAnimation animation, bool showSummonPulse = true)
+        {
+            if (animation.IsSummon && showSummonPulse)
+                yield return PlaySummonPulse(animation.To);
+
+            RectTransform visual = CreateAnimatedCard(animation.Card.Definition,
+                animation.IsSet ? false : animation.StartsFaceUp,
+                animation.From, animation.StartSize);
+            if (animation.ShowPopup && !animation.IsSet)
+            {
+                yield return TweenCardVisual(visual, animation.From, new Vector2(0.5f, 0.5f),
+                    animation.StartSize, new Vector2(190f, 266f), 0.3f);
+                if (!animation.StartsFaceUp)
+                    yield return FlipAnimatedCard(visual, true);
+                yield return new WaitForSecondsRealtime(0.8f);
+                yield return TweenCardVisual(visual, new Vector2(0.5f, 0.5f), animation.To,
+                    new Vector2(190f, 266f), animation.EndSize, 0.3f);
+            }
+            else
+            {
+                if (animation.IsSet)
+                    yield return TweenSetCardAndHand(visual, animation, new List<CardMovementAnimation>(),
+                        new List<RectTransform>(), 0.42f);
+                else
+                    yield return TweenCardVisual(visual, animation.From, animation.To,
+                        animation.StartSize, animation.EndSize, 0.42f);
+                if (animation.IsSet)
+                    visual.localRotation = Quaternion.Euler(0f, 0f, 90f);
+                else if (animation.StartsFaceUp != animation.EndsFaceUp)
+                    yield return FlipAnimatedCard(visual, animation.EndsFaceUp);
+            }
+
+            yield return TweenCardVisual(visual, animation.To, animation.To,
+                animation.EndSize, animation.EndSize * 1.08f, 0.07f);
+            yield return TweenCardVisual(visual, animation.To, animation.To,
+                animation.EndSize * 1.08f, animation.EndSize, 0.09f);
+            Destroy(visual.gameObject);
+            CompleteCardArrival(animation.Card);
+        }
+
+        private void CompleteCardArrival(CardInstance card)
+        {
+            if (animatingCardArrivals.Remove(card) && contentRoot != null)
+                Render();
+        }
+
+        private IEnumerator PlaySummonPulse(Vector2 position, Color? pulseColor = null)
+        {
+            Color color = pulseColor ?? new Color(0.3f, 0.95f, 0.82f, 0.95f);
+            RectTransform canvasRect = (RectTransform)canvas.transform;
+            RectTransform pulse = CreateRect("Summon Slot Pulse", canvasRect);
+            pulse.anchorMin = new Vector2(0.5f, 0.5f);
+            pulse.anchorMax = new Vector2(0.5f, 0.5f);
+            pulse.sizeDelta = new Vector2(120f, 120f);
+            SetAnimatedCardPosition(pulse, position);
+            Image image = pulse.gameObject.AddComponent<Image>();
+            image.sprite = GetCardBackCircleSprite();
+            image.color = color;
+            image.raycastTarget = false;
+            pulse.SetAsLastSibling();
+
+            const float duration = 0.34f;
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                float progress = Mathf.Clamp01(elapsed / duration);
+                float pulseScale = 0.35f + progress * 0.95f;
+                pulse.localScale = Vector3.one * pulseScale;
+                image.color = new Color(color.r, color.g, color.b, color.a * (1f - progress));
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+            Destroy(pulse.gameObject);
         }
 
         private RectTransform CreateAnimatedCard(
@@ -1129,7 +1909,11 @@ namespace DuelPrototype
         {
             if (phase == DuelPhase.GameOver || engine == null || canvas == null)
                 return;
-            QueuePhaseTicker(GetPhaseTickerLabel(phase));
+            string activePlayer = engine.CurrentPlayer == engine.Human ? "PLAYER" : "OPPONENT";
+            Color turnColor = GetTurnColor(engine.CurrentPlayer == engine.Human);
+            QueuePhaseTicker(activePlayer + " - " + GetPhaseTickerLabel(phase),
+                backgroundColor: turnColor,
+                edgeColor: Color.Lerp(turnColor, Color.white, 0.18f));
         }
 
         private static string GetPhaseTickerLabel(DuelPhase phase)
@@ -1154,21 +1938,19 @@ namespace DuelPrototype
             Image blockerImage = inputBlocker.gameObject.AddComponent<Image>();
             blockerImage.color = new Color(0f, 0f, 0f, 0f);
             blockerImage.raycastTarget = true;
-            canvasInputGroup.interactable = false;
-            canvasInputGroup.blocksRaycasts = true;
-
             while (phaseTickerQueue.Count > 0)
             {
+                PhaseTickerMessage message = phaseTickerQueue.Dequeue();
                 RectTransform ticker = CreateRect("Phase Ticker", canvasRect);
                 ticker.anchorMin = new Vector2(0f, 0.505f);
                 ticker.anchorMax = new Vector2(1f, 0.59f);
                 ticker.sizeDelta = Vector2.zero;
                 ticker.anchoredPosition = new Vector2(-canvasRect.rect.width, 0f);
                 Image background = ticker.gameObject.AddComponent<Image>();
-                background.color = new Color(0.035f, 0.055f, 0.085f, 1f);
+                background.color = message.BackgroundColor;
                 background.raycastTarget = false;
-                AddPhaseTickerEdge(ticker, true);
-                AddPhaseTickerEdge(ticker, false);
+                AddPhaseTickerEdge(ticker, true, message.AccentColor);
+                AddPhaseTickerEdge(ticker, false, message.AccentColor);
                 ticker.SetAsLastSibling();
 
                 yield return SlidePhaseTickerBackground(ticker, canvasRect.rect.width, 0.3f);
@@ -1179,7 +1961,7 @@ namespace DuelPrototype
                 labelRect.sizeDelta = Vector2.zero;
                 Text label = labelRect.gameObject.AddComponent<Text>();
                 label.font = font;
-                label.text = phaseTickerQueue.Dequeue();
+                label.text = message.Label;
                 label.fontSize = 21;
                 label.fontStyle = FontStyle.Bold;
                 label.color = Color.white;
@@ -1194,14 +1976,14 @@ namespace DuelPrototype
             }
 
             Destroy(inputBlocker.gameObject);
-            canvasInputGroup.interactable = true;
             phaseTickerRoutine = null;
             Action onComplete = phaseTickerCompletion;
             phaseTickerCompletion = null;
             onComplete?.Invoke();
+            TryStartNextPresentation();
         }
 
-        private void AddPhaseTickerEdge(RectTransform ticker, bool top)
+        private void AddPhaseTickerEdge(RectTransform ticker, bool top, Color edgeColor)
         {
             RectTransform edge = CreateRect(top ? "Top Accent Band" : "Bottom Accent Band", ticker);
             float edgeAnchor = top ? 1f : 0f;
@@ -1210,7 +1992,7 @@ namespace DuelPrototype
             edge.sizeDelta = new Vector2(0f, 3f);
             edge.anchoredPosition = new Vector2(0f, top ? -1.5f : 1.5f);
             Image image = edge.gameObject.AddComponent<Image>();
-            image.color = new Color(accentColor.r, accentColor.g, accentColor.b, 0.78f);
+            image.color = new Color(edgeColor.r, edgeColor.g, edgeColor.b, 0.78f);
             image.raycastTarget = false;
         }
 
@@ -1250,14 +2032,15 @@ namespace DuelPrototype
             if (engine == null || canvas == null || attacker == null)
                 return;
 
-            Vector2 from = lastCardVisualStates != null &&
-                lastCardVisualStates.TryGetValue(attacker, out CardVisualState attackerState)
+            Dictionary<CardInstance, CardVisualState> currentStates = CaptureCardVisualStates();
+            bool hasAttackerState = currentStates.TryGetValue(attacker, out CardVisualState attackerState);
+            Vector2 from = hasAttackerState
                 ? GetCardVisualPosition(attackerState)
                 : new Vector2(0.5f, 0.35f);
             Vector2 to = target == null
-                ? new Vector2(0.5f, 0.83f)
-                : lastCardVisualStates != null &&
-                  lastCardVisualStates.TryGetValue(target, out CardVisualState targetState)
+                ? DuelAttackLayout.GetDirectAttackTarget(
+                    hasAttackerState && attackerState.Owner == engine.Opponent)
+                : currentStates.TryGetValue(target, out CardVisualState targetState)
                     ? GetCardVisualPosition(targetState)
                     : new Vector2(0.5f, 0.59f);
 
@@ -1267,8 +2050,7 @@ namespace DuelPrototype
                 From = from,
                 To = to
             });
-            if (attackAnimationRoutine == null)
-                attackAnimationRoutine = StartCoroutine(PlayAttackAnimations());
+            TryStartNextPresentation();
         }
 
         private IEnumerator PlayAttackAnimations()
@@ -1305,6 +2087,7 @@ namespace DuelPrototype
             }
 
             attackAnimationRoutine = null;
+            TryStartNextPresentation();
         }
 
         private void DrawDuelScreen()
@@ -1331,6 +2114,8 @@ namespace DuelPrototype
                 if (!string.IsNullOrEmpty(notice))
                     AddText(contentRoot, notice, 0.2f, 0.12f, 0.8f, 0.18f,
                         14, new Color(1f, 0.78f, 0.35f), TextAnchor.MiddleCenter);
+                if (coinTossOpen)
+                    DrawCoinTossOverlay();
                 return;
             }
 
@@ -1375,71 +2160,174 @@ namespace DuelPrototype
                 DrawResponseWindow();
         }
 
+        private void DrawCoinTossOverlay()
+        {
+            AddPanel(contentRoot, 0f, 0f, 1f, 1f, new Color(0.01f, 0.02f, 0.035f, 0.92f));
+            AddPanel(contentRoot, 0.2f, 0.22f, 0.8f, 0.78f, panelColor);
+            AddText(contentRoot, "COIN TOSS", 0.25f, 0.67f, 0.75f, 0.73f,
+                24, accentColor, TextAnchor.MiddleCenter, true);
+
+            if (!coinFlipResolved)
+            {
+                AddText(contentRoot, coinFlipInProgress
+                        ? "Flipping the coin..."
+                        : "Choose heads or tails.",
+                    0.25f, 0.59f, 0.75f, 0.65f, 16, Color.white, TextAnchor.MiddleCenter);
+                if (!coinFlipInProgress)
+                {
+                    AddButton(contentRoot, "HEADS", 0.31f, 0.43f, 0.48f, 0.52f,
+                        new Color(0.78f, 0.58f, 0.16f), () => CallCoinSide(true), 15);
+                    AddButton(contentRoot, "TAILS", 0.52f, 0.43f, 0.69f, 0.52f,
+                        new Color(0.34f, 0.4f, 0.52f), () => CallCoinSide(false), 15);
+                    AddButton(contentRoot, "CANCEL", 0.4f, 0.31f, 0.6f, 0.38f,
+                        new Color(0.25f, 0.29f, 0.34f), () =>
+                        {
+                            coinTossOpen = false;
+                            Render();
+                        }, 11);
+                }
+                return;
+            }
+
+            AddText(contentRoot, coinTossResult, 0.25f, 0.57f, 0.75f, 0.65f,
+                15, Color.white, TextAnchor.MiddleCenter);
+            if (playerWonCoinFlip)
+            {
+                AddButton(contentRoot, "I'LL GO FIRST", 0.29f, 0.42f, 0.49f, 0.51f,
+                    new Color(0.15f, 0.38f, 0.66f), () => BeginDuelAfterCoinToss(true), 13);
+                AddButton(contentRoot, "I'LL GO SECOND", 0.51f, 0.42f, 0.71f, 0.51f,
+                    new Color(0.56f, 0.2f, 0.23f), () => BeginDuelAfterCoinToss(false), 13);
+            }
+        }
+
         private void DrawOpponentHandBacks()
         {
             int cardCount = engine.Opponent.Hand.Count;
             if (cardCount == 0)
                 return;
 
-            const int maxVisibleCards = 10;
-            int visibleCards = Mathf.Min(cardCount, maxVisibleCards);
-            float baseWidth = GetPortraitWidth(HandCardHeight);
-            float cardGap = Mathf.Min(HandCardGap, HandMaxWidth / Mathf.Max(1, visibleCards - 1));
-            float cardWidth = Mathf.Min(baseWidth, (HandMaxWidth - (visibleCards - 1) * cardGap) / visibleCards);
+            int visibleCards = Mathf.Min(cardCount, DuelHandLayout.MaxVisibleOpponentCards);
+            float cardWidth = DuelHandLayout.GetCardWidth(cardCount, GetScreenAspectRatio(), true);
             float cardHeight = GetPortraitHeight(cardWidth);
-            float totalWidth = visibleCards * cardWidth + (visibleCards - 1) * cardGap;
-            float startX = (1f - totalWidth) * 0.5f;
             for (int i = 0; i < visibleCards; i++)
             {
-                float xMin = startX + i * (cardWidth + cardGap);
-                RectTransform cardBack = AddPanel(contentRoot, xMin, 0.875f, xMin + cardWidth,
-                    0.875f + cardHeight, new Color(0.08f, 0.16f, 0.3f));
+                CardInstance card = engine.Opponent.Hand[i];
+                Vector2 center = DuelHandLayout.GetCardCenter(i, cardCount, GetScreenAspectRatio(), true);
+                float xMin = center.x - cardWidth * 0.5f;
+                RectTransform cardBack = AddPanel(contentRoot, xMin,
+                    center.y - cardHeight * 0.5f, xMin + cardWidth, center.y + cardHeight * 0.5f,
+                    new Color(0.08f, 0.16f, 0.3f));
+                cardBack.gameObject.AddComponent<DuelHandCardVisual>().Card = card;
+                if (animatedHandCards.Contains(card))
+                    cardBack.gameObject.AddComponent<CanvasGroup>().alpha = 0f;
                 AddCardArtPlaceholder(cardBack, null, 0.04f, 0.04f, 0.96f, 0.96f, false);
+            }
+        }
+
+        private void DrawAiVisibleHand(DuelPlayer owner, bool opponent)
+        {
+            int count = owner.Hand.Count;
+            if (count == 0)
+                return;
+
+            int visibleCount = opponent
+                ? Mathf.Min(count, DuelHandLayout.MaxVisibleOpponentCards)
+                : count;
+            float width = DuelHandLayout.GetCardWidth(count, GetScreenAspectRatio(), opponent);
+            float height = GetPortraitHeight(width);
+            for (int i = 0; i < visibleCount; i++)
+            {
+                CardInstance card = owner.Hand[i];
+                Vector2 center = DuelHandLayout.GetCardCenter(i, count,
+                    GetScreenAspectRatio(), opponent);
+                RectTransform cardView = AddButton(contentRoot, card.Definition.DisplayName,
+                    center.x - width * 0.5f, center.y - height * 0.5f,
+                    center.x + width * 0.5f, center.y + height * 0.5f,
+                    CardFrameColor(card.Definition), () => { }, 8, card.Definition);
+                cardView.gameObject.AddComponent<DuelHandCardVisual>().Card = card;
+                if (animatedHandCards.Contains(card))
+                    cardView.gameObject.AddComponent<CanvasGroup>().alpha = 0f;
+                AddCardArtPlaceholder(cardView, card.Definition, 0.02f, 0.02f, 0.98f, 0.98f, true);
+                Text label = cardView.Find("Label").GetComponent<Text>();
+                SetAnchors(label.rectTransform, 0.02f, 0.02f, 0.98f, 0.28f);
+                label.alignment = TextAnchor.MiddleCenter;
+                label.fontSize = 8;
             }
         }
 
         private void DrawPhaseTrack()
         {
-            Color phaseColor = GetPhaseColor(engine.Phase);
-            AddPanel(contentRoot, 0.025f, 0.465f, 0.195f, 0.565f, panelColor);
+            bool humanTurn = engine.CurrentPlayer == engine.Human;
+            Color turnColor = GetTurnColor(humanTurn);
+            AddPanel(contentRoot, 0.025f, 0.465f, 0.195f, 0.565f,
+                Color.Lerp(panelColor, turnColor, 0.3f));
             AddText(contentRoot, "TURN " + engine.TurnNumber,
-                0.03f, 0.52f, 0.19f, 0.56f, 12, accentColor, TextAnchor.MiddleCenter, true);
-            AddButton(contentRoot, CurrentPhaseLabel(), 0.03f, 0.472f, 0.19f, 0.518f,
-                Color.Lerp(phaseColor, Color.white, 0.12f), () =>
+                0.03f, 0.537f, 0.19f, 0.56f, 12, accentColor, TextAnchor.MiddleCenter, true);
+            AddText(contentRoot, CurrentPhaseLabel(),
+                0.03f, 0.517f, 0.19f, 0.535f, 8, mutedColor, TextAnchor.MiddleCenter);
+            RectTransform phaseButton = AddButton(contentRoot, NextPhaseButtonLabel(),
+                0.03f, 0.472f, 0.19f, 0.514f,
+                Color.Lerp(turnColor, Color.white, 0.12f), () =>
                 {
                     if (!engine.IsHumanActionWindow || engine.ResponseWindowOpen || engine.SearchChoiceOpen)
                         return;
                     engine.AdvancePhase();
                     ClearSelection();
                     Render();
-                }, 12);
+                }, 10);
+            Text phaseButtonText = phaseButton.GetComponentInChildren<Text>();
+            phaseButtonText.resizeTextForBestFit = true;
+            phaseButtonText.resizeTextMinSize = 7;
+            phaseButtonText.resizeTextMaxSize = 10;
+
+            RectTransform endTurnButton = AddButton(contentRoot, "END TURN",
+                0.81f, 0.472f, 0.97f, 0.514f,
+                new Color(0.28f, 0.3f, 0.34f), () =>
+                {
+                    if (!engine.EndHumanTurn())
+                        return;
+                    ClearSelection();
+                    Render();
+                }, 10);
+            Text endTurnButtonText = endTurnButton.GetComponentInChildren<Text>();
+            endTurnButtonText.resizeTextForBestFit = true;
+            endTurnButtonText.resizeTextMinSize = 7;
+            endTurnButtonText.resizeTextMaxSize = 10;
+        }
+
+        private static Color GetTurnColor(bool humanTurn)
+        {
+            return humanTurn
+                ? new Color(0.12f, 0.34f, 0.62f)
+                : new Color(0.62f, 0.16f, 0.18f);
         }
 
         private string CurrentPhaseLabel()
         {
+            string activePlayer = engine.CurrentPlayer == engine.Human ? "PLAYER" : "OPPONENT";
             switch (engine.Phase)
             {
-                case DuelPhase.Draw: return "DRAW";
-                case DuelPhase.Standby: return "STANDBY";
-                case DuelPhase.MainOne: return "MAIN PHASE I";
-                case DuelPhase.Battle: return "BATTLE";
-                case DuelPhase.MainTwo: return "MAIN PHASE II";
-                case DuelPhase.End: return "END";
-                default: return engine.PhaseLabel.ToUpperInvariant();
+                case DuelPhase.Draw: return activePlayer + " - DRAW PHASE";
+                case DuelPhase.Standby: return activePlayer + " - STANDBY PHASE";
+                case DuelPhase.MainOne: return activePlayer + " - MAIN PHASE I";
+                case DuelPhase.Battle: return activePlayer + " - BATTLE PHASE";
+                case DuelPhase.MainTwo: return activePlayer + " - MAIN PHASE II";
+                case DuelPhase.End: return activePlayer + " - END PHASE";
+                default: return activePlayer + " - " + engine.PhaseLabel.ToUpperInvariant();
             }
         }
 
-        private static Color GetPhaseColor(DuelPhase phase)
+        private string NextPhaseButtonLabel()
         {
-            switch (phase)
+            switch (engine.Phase)
             {
-                case DuelPhase.Draw: return new Color(0.12f, 0.42f, 0.78f);
-                case DuelPhase.Standby: return new Color(0.08f, 0.58f, 0.62f);
-                case DuelPhase.MainOne: return new Color(0.18f, 0.58f, 0.32f);
-                case DuelPhase.Battle: return new Color(0.82f, 0.28f, 0.16f);
-                case DuelPhase.MainTwo: return new Color(0.5f, 0.58f, 0.2f);
-                case DuelPhase.End: return new Color(0.42f, 0.32f, 0.64f);
-                default: return new Color(0.14f, 0.2f, 0.28f);
+                case DuelPhase.Draw: return "GO TO STANDBY PHASE";
+                case DuelPhase.Standby: return "GO TO MAIN PHASE I";
+                case DuelPhase.MainOne: return "GO TO BATTLE PHASE";
+                case DuelPhase.Battle: return "GO TO MAIN PHASE II";
+                case DuelPhase.MainTwo: return "GO TO END PHASE";
+                case DuelPhase.End: return "GO TO DRAW PHASE";
+                default: return "DUEL OVER";
             }
         }
 
@@ -1482,7 +2370,7 @@ namespace DuelPrototype
             IReadOnlyList<CardInstance> choices = engine.AvailableSearchCards;
             AddPanel(contentRoot, 0, 0.09f, 1, 0.9f, new Color(0.01f, 0.02f, 0.035f, 0.9f));
             AddPanel(contentRoot, 0.06f, 0.12f, 0.94f, 0.88f, panelColor);
-            AddText(contentRoot, "SANGAN — CHOOSE A MONSTER",
+            AddText(contentRoot, engine.SearchChoiceTitle,
                 0.2f, 0.75f, 0.8f, 0.81f, 22, accentColor, TextAnchor.MiddleCenter, true);
             AddText(contentRoot, engine.SearchChoicePrompt + " Select a card, review it, then confirm.",
                 0.2f, 0.69f, 0.8f, 0.75f, 14, Color.white, TextAnchor.MiddleCenter);
@@ -1537,7 +2425,7 @@ namespace DuelPrototype
                 selectedSanganSearchCard == null ? null : selectedSanganSearchCard.Definition,
                 0.77f, 0.24f, 0.43f);
 
-            AddButton(contentRoot, "ADD SELECTED CARD TO HAND", 0.57f, 0.17f, 0.94f, 0.23f,
+            AddButton(contentRoot, engine.SearchChoiceActionLabel, 0.57f, 0.17f, 0.94f, 0.23f,
                 selectedSanganSearchCard == null ? mutedColor : accentColor,
                 () =>
                 {
@@ -1555,25 +2443,207 @@ namespace DuelPrototype
             scroll.scrollSensitivity = 36f;
         }
 
+        private void ConfigureCardDropTarget(RectTransform target, Func<CardInstance, bool> onDrop)
+        {
+            DuelCardDragHandler dragHandler = target.gameObject.AddComponent<DuelCardDragHandler>();
+            dragHandler.OnDropCard = onDrop;
+        }
+
+        private void BeginHandCardDrag(
+            CardInstance card,
+            RectTransform source,
+            PointerEventData eventData)
+        {
+            if (engine == null || screen != ScreenMode.Duel || !engine.IsHumanActionWindow ||
+                pendingTributeSummonCard != null)
+                return;
+
+            draggingHandCard = card;
+            dragDropHandled = false;
+            draggedCardSourceGroup = source.GetComponent<CanvasGroup>();
+            if (draggedCardSourceGroup == null)
+                draggedCardSourceGroup = source.gameObject.AddComponent<CanvasGroup>();
+            draggedCardSourceGroup.alpha = 0f;
+
+            int cardIndex = engine.Human.Hand.IndexOf(card);
+            Vector2 start = DuelHandLayout.GetCardCenter(cardIndex, engine.Human.Hand.Count,
+                GetScreenAspectRatio(), false);
+            RectTransform canvasRect = (RectTransform)canvas.transform;
+            draggedCardVisual = CreateAnimatedCard(card.Definition, true, start,
+                new Vector2(source.rect.width, source.rect.height));
+            UpdateDraggedCardVisual(eventData);
+        }
+
+        private void UpdateDraggedCardVisual(PointerEventData eventData)
+        {
+            if (draggedCardVisual == null)
+                return;
+
+            RectTransform canvasRect = (RectTransform)canvas.transform;
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    canvasRect, eventData.position, eventData.pressEventCamera, out Vector2 localPosition))
+                draggedCardVisual.anchoredPosition = localPosition;
+        }
+
+        private void EndHandCardDrag(PointerEventData eventData)
+        {
+            if (draggingHandCard == null)
+                return;
+
+            RectTransform canvasRect = (RectTransform)canvas.transform;
+            bool overHand = RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                canvasRect, eventData.position, eventData.pressEventCamera, out Vector2 localPosition) &&
+                localPosition.y / canvasRect.rect.height + 0.5f <= 0.2f;
+            if (!dragDropHandled && overHand)
+                ReorderHandCard(draggingHandCard, localPosition.x / canvasRect.rect.width + 0.5f);
+
+            if (draggedCardVisual != null)
+                Destroy(draggedCardVisual.gameObject);
+            if (draggedCardSourceGroup != null)
+                draggedCardSourceGroup.alpha = 1f;
+            draggingHandCard = null;
+            draggedCardVisual = null;
+            draggedCardSourceGroup = null;
+            Render();
+        }
+
+        private void ReorderHandCard(CardInstance card, float normalizedX)
+        {
+            List<CardInstance> hand = engine.Human.Hand;
+            int oldIndex = hand.IndexOf(card);
+            if (oldIndex < 0 || hand.Count < 2)
+                return;
+
+            int targetIndex = 0;
+            float closestDistance = float.MaxValue;
+            for (int i = 0; i < hand.Count; i++)
+            {
+                float centerX = DuelHandLayout.GetCardCenter(i, hand.Count, GetScreenAspectRatio(), false).x;
+                float distance = Mathf.Abs(centerX - normalizedX);
+                if (distance >= closestDistance)
+                    continue;
+                closestDistance = distance;
+                targetIndex = i;
+            }
+
+            if (targetIndex == oldIndex)
+                return;
+            hand.RemoveAt(oldIndex);
+            hand.Insert(Mathf.Clamp(targetIndex, 0, hand.Count), card);
+        }
+
+        private bool HandleMonsterZoneDrop(CardInstance card, int zoneIndex)
+        {
+            if (!CanPlayDraggedHandCard(card))
+                return false;
+            if (!card.Definition.IsMonster)
+                return false;
+
+            if (card.Definition.Effect == CardEffect.Berserkion ||
+                card.Definition.Effect == CardEffect.Valkyrion)
+                return CompleteDragAction(() => engine.TrySpecialSummonBoss(card, zoneIndex));
+            if (!card.Definition.CanNormalSummon)
+            {
+                notice = "This monster needs its card-specific Special Summon procedure.";
+                return false;
+            }
+
+            int tributeCount = card.Definition.Level >= 7 ? 2 : card.Definition.Level >= 5 ? 1 : 0;
+            if (tributeCount > 0)
+            {
+                pendingTributeSummonCard = card;
+                pendingTributeSummonZone = zoneIndex;
+                selectedMaterials.Clear();
+                selectedHandCard = card;
+                dragDropHandled = true;
+                notice = "";
+                return true;
+            }
+
+            return CompleteDragAction(() => engine.TryNormalSummon(
+                card, Array.Empty<CardInstance>(), preferredMonsterZone: zoneIndex));
+        }
+
+        private bool HandleSpellTrapZoneDrop(CardInstance card, int zoneIndex)
+        {
+            if (!CanPlayDraggedHandCard(card))
+                return false;
+            if (card.Definition.Kind == CardKind.Trap)
+                return CompleteDragAction(() => engine.TrySetBackrow(card, zoneIndex));
+            if (card.Definition.Kind != CardKind.Spell ||
+                card.Definition.Subtype == CardSubtype.Field)
+                return false;
+
+            if (card.Definition.Effect == CardEffect.ReviveMonsterFromGraveyard)
+            {
+                selectedHandCard = card;
+                selectedTarget = null;
+                dragDropHandled = true;
+                OpenGraveyard(engine.Human);
+                return true;
+            }
+
+            CardInstance target = selectedTarget ?? selectedMonsterCard;
+            return CompleteDragAction(() => engine.TryActivate(card, target));
+        }
+
+        private bool HandleFieldSpellZoneDrop(CardInstance card)
+        {
+            if (!CanPlayDraggedHandCard(card) ||
+                card.Definition.Kind != CardKind.Spell ||
+                card.Definition.Subtype != CardSubtype.Field)
+                return false;
+
+            return CompleteDragAction(() => engine.TryActivate(card));
+        }
+
+        private bool CanPlayDraggedHandCard(CardInstance card)
+        {
+            return engine != null && screen == ScreenMode.Duel && engine.IsHumanActionWindow &&
+                   (engine.Phase == DuelPhase.MainOne || engine.Phase == DuelPhase.MainTwo) &&
+                   card != null && engine.Human.Hand.Contains(card);
+        }
+
+        private bool CompleteDragAction(Func<bool> action)
+        {
+            bool succeeded = action();
+            if (succeeded)
+            {
+                dragDropHandled = true;
+                notice = "";
+                ClearSelection();
+            }
+            else if (engine.Messages.Count > 0)
+                notice = engine.Messages[engine.Messages.Count - 1];
+            return succeeded;
+        }
+
         private void DrawZoneRow(CardInstance[] zones, float y, bool opponent)
         {
             for (int i = 0; i < zones.Length; i++)
             {
+                int zoneIndex = i;
                 float xMin = MonsterCardStartX + i * MonsterCardStepX;
                 float xMax = xMin + BoardCardWidth;
                 CardInstance card = zones[i];
-                string label = card == null ? "MONSTER\nSLOT" : CardLabel(card, opponent);
-                Color color = card == null ? new Color(0.09f, 0.13f, 0.18f) :
-                    (selectedMaterials.Contains(card) || card == selectedMonsterCard || card == selectedAttacker
+                CardInstance displayedCard = card != null && animatingCardArrivals.Contains(card) ? null : card;
+                string label = displayedCard == null ? "MONSTER\nSLOT" : CardLabel(displayedCard, opponent);
+                Color color = displayedCard == null ? new Color(0.09f, 0.13f, 0.18f) :
+                    (selectedMaterials.Contains(displayedCard) || displayedCard == selectedMonsterCard ||
+                     displayedCard == selectedAttacker
                         ? new Color(0.11f, 0.45f, 0.43f)
-                        : CardZoneColor(card));
+                        : CardZoneColor(displayedCard));
                 RectTransform slot = AddButton(contentRoot, label, xMin, y, xMax, y + BoardCardHeight, color,
                     () => OnZoneClicked(card, opponent), 11,
-                    card != null && (!opponent || card.FaceUp) ? card.Definition : null);
-                AddCardArtPlaceholder(slot, card != null && (!opponent || card.FaceUp) ? card.Definition : null,
-                    0f, 0f, 1f, 1f, card == null || card.FaceUp);
-                RotateDefenseMonster(slot, card);
-                FitMonsterSlotStats(slot, card);
+                    displayedCard != null && (!opponent || displayedCard.FaceUp)
+                        ? displayedCard.Definition : null);
+                if (!opponent)
+                    ConfigureCardDropTarget(slot, draggedCard => HandleMonsterZoneDrop(draggedCard, zoneIndex));
+                AddCardArtPlaceholder(slot,
+                    displayedCard != null && (!opponent || displayedCard.FaceUp) ? displayedCard.Definition : null,
+                    0f, 0f, 1f, 1f, displayedCard == null || displayedCard.FaceUp);
+                RotateDefenseMonster(slot, displayedCard);
+                FitMonsterSlotStats(slot, displayedCard);
             }
         }
 
@@ -1581,17 +2651,21 @@ namespace DuelPrototype
         {
             for (int i = 0; i < zones.Length; i++)
             {
+                int zoneIndex = i;
                 float xMin = MonsterCardStartX + i * MonsterCardStepX;
                 CardInstance card = zones[i];
-                string label = card == null ? "SPELL/TRAP\nSLOT" :
-                    card.FaceUp ? CardLabel(card, true) : "SET CARD";
-                Color color = card == null ? new Color(0.09f, 0.13f, 0.18f) :
-                    card == selectedTarget ? new Color(0.11f, 0.45f, 0.43f) : CardZoneColor(card);
+                CardInstance displayedCard = card != null && animatingCardArrivals.Contains(card) ? null : card;
+                string label = displayedCard == null ? "SPELL/TRAP\nSLOT" :
+                    displayedCard.FaceUp ? CardLabel(displayedCard, true) : "SET CARD";
+                Color color = displayedCard == null ? new Color(0.09f, 0.13f, 0.18f) :
+                    displayedCard == selectedTarget ? new Color(0.11f, 0.45f, 0.43f) : CardZoneColor(displayedCard);
                 RectTransform slot = AddButton(contentRoot, label, xMin, y, xMin + BoardCardWidth, y + BoardCardHeight, color,
                     () => OnSpellTrapZoneClicked(card), 10,
-                    card != null && card.FaceUp ? card.Definition : null);
-                AddCardArtPlaceholder(slot, card != null && card.FaceUp ? card.Definition : null,
-                    0f, 0f, 1f, 1f, card == null || card.FaceUp);
+                    displayedCard != null && displayedCard.FaceUp ? displayedCard.Definition : null);
+                ConfigureCardDropTarget(slot, draggedCard => HandleSpellTrapZoneDrop(draggedCard, zoneIndex));
+                AddCardArtPlaceholder(slot, displayedCard != null && displayedCard.FaceUp
+                        ? displayedCard.Definition : null,
+                    0f, 0f, 1f, 1f, displayedCard == null || displayedCard.FaceUp);
                 AddSpellTrapTargetHover(slot, card);
             }
         }
@@ -1621,6 +2695,7 @@ namespace DuelPrototype
 
         private void DrawFieldSpellSlot(CardInstance card, bool opponent)
         {
+            CardInstance displayedCard = card != null && animatingCardArrivals.Contains(card) ? null : card;
             float xMin = opponent ? OpponentDeckX : 0.205f;
             float yMin = GetFieldSpellZoneY(opponent);
             float labelY = screen == ScreenMode.AiLab
@@ -1628,14 +2703,19 @@ namespace DuelPrototype
                 : yMin + BoardCardHeight + 0.002f;
             AddText(contentRoot, "FIELD", xMin, labelY, xMin + BoardCardWidth,
                 labelY + 0.02f, 9, mutedColor, TextAnchor.MiddleCenter, true);
-            RectTransform slot = AddButton(contentRoot, card == null ? "FIELD\nSLOT" : CardLabel(card, opponent),
+            RectTransform slot = AddButton(contentRoot,
+                displayedCard == null ? "FIELD\nSLOT" : CardLabel(displayedCard, opponent),
                 xMin, yMin, xMin + BoardCardWidth, yMin + BoardCardHeight,
-                card == null ? new Color(0.09f, 0.13f, 0.18f) :
-                    card == selectedTarget ? new Color(0.11f, 0.45f, 0.43f) : CardZoneColor(card),
+                displayedCard == null ? new Color(0.09f, 0.13f, 0.18f) :
+                    displayedCard == selectedTarget ? new Color(0.11f, 0.45f, 0.43f) : CardZoneColor(displayedCard),
                 () => OnSpellTrapZoneClicked(card), 9,
-                card != null && (!opponent || card.FaceUp) ? card.Definition : null);
-            AddCardArtPlaceholder(slot, card != null && (!opponent || card.FaceUp) ? card.Definition : null,
-                0f, 0f, 1f, 1f, card == null || card.FaceUp);
+                displayedCard != null && (!opponent || displayedCard.FaceUp)
+                    ? displayedCard.Definition : null);
+            if (!opponent)
+                ConfigureCardDropTarget(slot, HandleFieldSpellZoneDrop);
+            AddCardArtPlaceholder(slot,
+                displayedCard != null && (!opponent || displayedCard.FaceUp) ? displayedCard.Definition : null,
+                0f, 0f, 1f, 1f, displayedCard == null || displayedCard.FaceUp);
             AddSpellTrapTargetHover(slot, card);
         }
 
@@ -1831,10 +2911,23 @@ namespace DuelPrototype
 
         private void DrawGraveyardOverlay()
         {
+            bool selectingMonsterRebornTarget = selectedHandCard != null &&
+                engine.Human.Hand.Contains(selectedHandCard) &&
+                selectedHandCard.Definition.Effect == CardEffect.ReviveMonsterFromGraveyard;
             AddPanel(contentRoot, 0, 0.09f, 1, 0.9f, new Color(0.01f, 0.02f, 0.035f, 0.88f));
             AddPanel(contentRoot, 0.08f, 0.12f, 0.92f, 0.88f, panelColor);
             AddText(contentRoot, graveyardOwner.Name + " GRAVEYARD  •  " + graveyardOwner.Graveyard.Count + " cards",
-                0.12f, 0.81f, 0.72f, 0.86f, 22, Color.white, TextAnchor.MiddleLeft, true);
+                0.12f, 0.81f, selectingMonsterRebornTarget ? 0.45f : 0.72f, 0.86f,
+                22, Color.white, TextAnchor.MiddleLeft, true);
+            if (selectingMonsterRebornTarget)
+            {
+                AddButton(contentRoot, "YOU", 0.48f, 0.81f, 0.59f, 0.86f,
+                    graveyardOwner == engine.Human ? accentColor : new Color(0.15f, 0.22f, 0.31f),
+                    () => OpenGraveyard(engine.Human), 11);
+                AddButton(contentRoot, "OPPONENT", 0.60f, 0.81f, 0.77f, 0.86f,
+                    graveyardOwner == engine.Opponent ? accentColor : new Color(0.15f, 0.22f, 0.31f),
+                    () => OpenGraveyard(engine.Opponent), 11);
+            }
             AddButton(contentRoot, "CLOSE", 0.82f, 0.81f, 0.88f, 0.86f, new Color(0.36f, 0.22f, 0.24f),
                 () =>
                 {
@@ -1893,6 +2986,29 @@ namespace DuelPrototype
                 ? selectedGraveyardCard : graveyardOwner.Graveyard.LastOrDefault();
             graveyardPreviewRoot = CreatePortraitCardPreview(selected == null ? null : selected.Definition,
                 0.685f, 0.18f, 0.61f);
+            if (selectedHandCard != null && engine.Human.Hand.Contains(selectedHandCard) &&
+                selectedHandCard.Definition.Effect == CardEffect.ReviveMonsterFromGraveyard)
+            {
+                bool canSelectForReborn = selected != null && selected.Definition.IsMonster &&
+                    selected.Definition.Kind != CardKind.Token;
+                AddButton(contentRoot, "SPECIAL SUMMON SELECTED MONSTER", 0.55f, 0.17f, 0.88f, 0.23f,
+                    canSelectForReborn ? accentColor : new Color(0.2f, 0.25f, 0.31f),
+                    () =>
+                    {
+                        if (!canSelectForReborn)
+                            return;
+                        Act(() =>
+                        {
+                            bool succeeded = engine.TryActivate(selectedHandCard, selected);
+                            if (succeeded)
+                            {
+                                graveyardOwner = null;
+                                selectedGraveyardCard = null;
+                            }
+                            return succeeded;
+                        });
+                    }, 10);
+            }
             if (selected == null)
             {
                 return;
@@ -1995,6 +3111,29 @@ namespace DuelPrototype
                 selectedAttacker = card;
                 selectedMonsterCard = card;
             }
+            else if (selectedSynchro != null && selectedSynchro.Kind == CardKind.Synchro &&
+                     (engine.Phase == DuelPhase.MainOne || engine.Phase == DuelPhase.MainTwo))
+            {
+                if (!card.FaceUp && !selectedMaterials.Contains(card))
+                {
+                    notice = "Synchro Materials must be face-up monsters.";
+                    Render();
+                    return;
+                }
+
+                if (!selectedMaterials.Add(card))
+                    selectedMaterials.Remove(card);
+                selectedMonsterCard = null;
+                if (engine.IsHumanActionWindow && engine.CanSynchroSummon(
+                        selectedSynchro, selectedMaterials.ToList(), engine.Human))
+                {
+                    CardDefinition synchro = selectedSynchro;
+                    List<CardInstance> materials = selectedMaterials.ToList();
+                    Act(() => engine.TrySynchroSummon(synchro, materials));
+                    return;
+                }
+                notice = "";
+            }
             else
             {
                 selectedMonsterCard = card;
@@ -2037,7 +3176,17 @@ namespace DuelPrototype
             float actionX = 0.03f;
             if (engine.Phase == DuelPhase.MainOne || engine.Phase == DuelPhase.MainTwo)
             {
-                if (selectedHandCard != null && selectedHandCard.Definition.IsMonster)
+                if (selectedRitualMonster != null)
+                {
+                    if (engine.Human.Hand.Any(card => card.Definition.Kind == CardKind.Spell &&
+                                                      card.Definition.Subtype == CardSubtype.Ritual))
+                        AddContextAction(ref actionX, "RITUAL SUMMON", accentColor, () => Act(() =>
+                            engine.TryRitualSummon(selectedRitualMonster, selectedMaterials.ToList())));
+                    else
+                        AddContextAction(ref actionX, "RITUAL SPELL REQUIRED",
+                            new Color(0.2f, 0.25f, 0.31f), () => { });
+                }
+                else if (selectedHandCard != null && selectedHandCard.Definition.IsMonster)
                 {
                     if (!selectedHandCard.Definition.CanNormalSummon)
                     {
@@ -2089,9 +3238,16 @@ namespace DuelPrototype
                             string actionLabel = selectedHandCard.Definition.Effect == CardEffect.DestroySpellTrap &&
                                 selectedTarget != null
                                 ? "DESTROY SELECTED"
+                                : selectedHandCard.Definition.Effect == CardEffect.ReviveMonsterFromGraveyard
+                                    ? "OPEN GRAVEYARD TO SELECT"
                                 : "ACTIVATE SPELL";
-                            AddContextAction(ref actionX, actionLabel, accentColor, () => Act(() =>
-                                engine.TryActivate(selectedHandCard, effectTarget)));
+                            bool needsGraveyardChoice = selectedHandCard.Definition.Effect ==
+                                CardEffect.ReviveMonsterFromGraveyard;
+                            AddContextAction(ref actionX, actionLabel,
+                                needsGraveyardChoice ? new Color(0.2f, 0.34f, 0.46f) : accentColor,
+                                needsGraveyardChoice
+                                    ? () => OpenGraveyard(engine.Human)
+                                    : () => Act(() => engine.TryActivate(selectedHandCard, effectTarget)));
                         }
                     }
                     if (selectedHandCard.Definition.Subtype != CardSubtype.Field)
@@ -2113,9 +3269,6 @@ namespace DuelPrototype
                     AddContextAction(ref actionX, "FLIP SUMMON", accentColor, () => Act(() =>
                         engine.TryFlipSummon(selectedMonsterCard)));
 
-                if (selectedSynchro != null && engine.CanSynchroSummon(selectedSynchro, selectedMaterials.ToList(), engine.Human))
-                    AddContextAction(ref actionX, "SYNCHRO SUMMON", new Color(0.44f, 0.24f, 0.56f), () => Act(() =>
-                        engine.TrySynchroSummon(selectedSynchro, selectedMaterials.ToList())));
             }
             else if (engine.Phase == DuelPhase.Battle)
             {
@@ -2260,9 +3413,27 @@ namespace DuelPrototype
                         : CardFrameColor(definition),
                     () =>
                     {
+                        if (definition.Kind == CardKind.Synchro &&
+                            engine.Phase != DuelPhase.MainOne && engine.Phase != DuelPhase.MainTwo)
+                        {
+                            notice = "Synchro Summons are only available during a Main Phase.";
+                            extraDeckOpen = false;
+                            Render();
+                            return;
+                        }
                         selectedSynchro = definition;
                         selectedMaterials.Clear();
+                        selectedMonsterCard = null;
+                        selectedTarget = null;
+                        if (definition.Kind == CardKind.Synchro)
+                        {
+                            selectedHandCard = null;
+                            selectedAttacker = null;
+                        }
                         extraDeckOpen = false;
+                        notice = definition.Kind == CardKind.Synchro
+                            ? "Select a face-up Tuner and non-Tuner materials on your field."
+                            : "";
                         Render();
                     }, 10, definition);
                 AddCardArtPlaceholder(cardButton, definition, 0f, 0f, 1f, 1f, true);
@@ -2282,22 +3453,60 @@ namespace DuelPrototype
                 AddText(contentRoot, "Your hand is empty.", 0.03f, 0.04f, 0.52f, 0.1f, 14, mutedColor, TextAnchor.MiddleCenter);
                 return;
             }
-            float baseWidth = GetPortraitWidth(HandCardHeight);
-            float gap = Math.Min(HandCardGap, HandMaxWidth / Math.Max(1, count - 1));
-            float width = Math.Min(baseWidth, (HandMaxWidth - (count - 1) * gap) / count);
+            float width = DuelHandLayout.GetCardWidth(count, GetScreenAspectRatio(), false);
             float height = GetPortraitHeight(width);
-            float totalWidth = count * width + (count - 1) * gap;
-            float start = (1f - totalWidth) * 0.5f;
             for (int i = 0; i < count; i++)
             {
                 CardInstance card = engine.Human.Hand[i];
-                float x = start + i * (width + gap);
-                RectTransform cardButton = AddButton(contentRoot, CardLabel(card, false), x, 0.018f, x + width, 0.018f + height,
+                Vector2 center = DuelHandLayout.GetCardCenter(i, count, GetScreenAspectRatio(), false);
+                float x = center.x - width * 0.5f;
+                float bottom = center.y - height * 0.5f;
+                RectTransform cardButton = AddButton(contentRoot, card.Definition.DisplayName, x, bottom,
+                    x + width, bottom + height,
                     selectedHandCard == card || selectedMaterials.Contains(card)
                         ? Color.Lerp(CardFrameColor(card.Definition), accentColor, 0.5f)
                         : CardFrameColor(card.Definition),
                     () =>
                     {
+                        if (selectedSynchro != null && selectedSynchro.Kind == CardKind.Synchro)
+                        {
+                            notice = "Synchro Materials must be face-up monsters on your field.";
+                            Render();
+                            return;
+                        }
+                        if (selectedRitualMonster == card)
+                        {
+                            selectedRitualMonster = null;
+                            selectedHandCard = null;
+                            selectedMaterials.Clear();
+                            Render();
+                            return;
+                        }
+                        if (selectedRitualMonster != null)
+                        {
+                            if (!card.Definition.IsMonster)
+                            {
+                                notice = "Only monsters can be selected as Ritual Materials.";
+                                Render();
+                                return;
+                            }
+                            if (!selectedMaterials.Add(card))
+                                selectedMaterials.Remove(card);
+                            selectedHandCard = selectedRitualMonster;
+                            Render();
+                            return;
+                        }
+                        if (card.Definition.IsRitualMonster)
+                        {
+                            selectedRitualMonster = card;
+                            selectedHandCard = card;
+                            selectedMonsterCard = null;
+                            selectedTarget = null;
+                            selectedMaterials.Clear();
+                            notice = "";
+                            Render();
+                            return;
+                        }
                         if (selectedSynchro != null && selectedSynchro.Kind == CardKind.Fusion &&
                             selectedHandCard != null && selectedHandCard.Definition.Effect == CardEffect.FusionSummon &&
                             card != selectedHandCard)
@@ -2326,6 +3535,15 @@ namespace DuelPrototype
                         }
                         Render();
                     }, 10, card.Definition);
+                DuelCardDragHandler dragHandler = cardButton.gameObject.AddComponent<DuelCardDragHandler>();
+                dragHandler.Card = card;
+                cardButton.gameObject.AddComponent<DuelHandCardVisual>().Card = card;
+                dragHandler.OnBeginDragAction = eventData =>
+                    BeginHandCardDrag(card, cardButton, eventData);
+                dragHandler.OnDragAction = UpdateDraggedCardVisual;
+                dragHandler.OnEndDragAction = EndHandCardDrag;
+                if (animatedHandCards.Contains(card))
+                    cardButton.gameObject.AddComponent<CanvasGroup>().alpha = 0f;
                 AddCardArtPlaceholder(cardButton, card.Definition, 0f, 0f, 1f, 1f, true);
                 Text label = cardButton.Find("Label").GetComponent<Text>();
                 SetAnchors(label.rectTransform, 0.02f, 0.02f, 0.98f, 0.28f);
@@ -2442,10 +3660,103 @@ namespace DuelPrototype
                 }, 13);
         }
 
+        private void DrawTributeSelectionOverlay()
+        {
+            int tributeCount = pendingTributeSummonCard.Definition.Level >= 7 ? 2 : 1;
+            AddPanel(contentRoot, 0f, 0f, 1f, 1f, new Color(0.01f, 0.02f, 0.035f, 0.88f));
+            AddPanel(contentRoot, 0.2f, 0.3f, 0.8f, 0.7f, panelColor);
+            AddText(contentRoot, "TRIBUTE SUMMON", 0.24f, 0.63f, 0.76f, 0.68f,
+                21, Color.white, TextAnchor.MiddleCenter, true);
+            AddText(contentRoot, "Choose " + tributeCount + " monster" +
+                    (tributeCount == 1 ? "" : "s") + " to Tribute for " +
+                    pendingTributeSummonCard.Definition.DisplayName + ".",
+                0.24f, 0.57f, 0.76f, 0.62f, 13, mutedColor, TextAnchor.MiddleCenter);
+
+            List<CardInstance> fieldMonsters = engine.Human.MonsterZones
+                .Where(card => card != null)
+                .ToList();
+            float buttonWidth = Mathf.Min(0.14f, 0.68f / Mathf.Max(1, fieldMonsters.Count));
+            float totalWidth = fieldMonsters.Count * buttonWidth;
+            float startX = 0.5f - totalWidth * 0.5f;
+            for (int i = 0; i < fieldMonsters.Count; i++)
+            {
+                CardInstance monster = fieldMonsters[i];
+                bool selected = selectedMaterials.Contains(monster);
+                AddButton(contentRoot,
+                    monster.Definition.DisplayName + "\nATK " + monster.CurrentAttack,
+                    startX + i * buttonWidth, 0.43f,
+                    startX + (i + 1) * buttonWidth - 0.008f, 0.55f,
+                    selected ? new Color(0.12f, 0.52f, 0.43f) : CardZoneColor(monster),
+                    () =>
+                    {
+                        if (!selectedMaterials.Add(monster))
+                            selectedMaterials.Remove(monster);
+                        Render();
+                    }, 10);
+            }
+            if (fieldMonsters.Count == 0)
+                AddText(contentRoot, "You have no monsters available to Tribute.",
+                    0.28f, 0.44f, 0.72f, 0.52f, 13, mutedColor, TextAnchor.MiddleCenter);
+
+            bool canConfirm = selectedMaterials.Count == tributeCount;
+            AddButton(contentRoot, "SUMMON",
+                0.34f, 0.34f, 0.49f, 0.41f,
+                canConfirm ? accentColor : new Color(0.2f, 0.25f, 0.31f),
+                () =>
+                {
+                    if (!canConfirm)
+                        return;
+                    CardInstance card = pendingTributeSummonCard;
+                    bool summoned = engine.TryNormalSummon(card,
+                        selectedMaterials.Where(material => engine.Human.MonsterZones.Contains(material)).ToList(),
+                        preferredMonsterZone: pendingTributeSummonZone);
+                    pendingTributeSummonCard = null;
+                    pendingTributeSummonZone = -1;
+                    if (summoned)
+                    {
+                        notice = "";
+                        ClearSelection();
+                    }
+                    else if (engine.Messages.Count > 0)
+                        notice = engine.Messages[engine.Messages.Count - 1];
+                    Render();
+                }, 12);
+            AddButton(contentRoot, "CANCEL",
+                0.51f, 0.34f, 0.66f, 0.41f,
+                new Color(0.32f, 0.2f, 0.23f), () =>
+                {
+                    pendingTributeSummonCard = null;
+                    pendingTributeSummonZone = -1;
+                    ClearSelection();
+                    Render();
+                }, 12);
+        }
+
         private string PhasePrompt()
         {
             if (!engine.IsHumanActionWindow)
                 return "Opponent is resolving its turn.";
+            if (selectedRitualMonster != null)
+            {
+                if (!engine.Human.Hand.Any(card => card.Definition.Kind == CardKind.Spell &&
+                                                   card.Definition.Subtype == CardSubtype.Ritual))
+                    return "Select a Ritual Monster, then add a Ritual Spell to your hand.";
+                int materialLevel = selectedMaterials.Where(card =>
+                    engine.Human.Hand.Contains(card) || engine.Human.MonsterZones.Contains(card))
+                    .Sum(card => card.Definition.Level);
+                return "Select Ritual Materials from your hand or field. Selected Level " + materialLevel +
+                       " / required " + selectedRitualMonster.Definition.Level + ".";
+            }
+            if (selectedSynchro != null && selectedSynchro.Kind == CardKind.Synchro &&
+                (engine.Phase == DuelPhase.MainOne || engine.Phase == DuelPhase.MainTwo))
+            {
+                int selectedLevel = selectedMaterials
+                    .Where(card => engine.Human.MonsterZones.Contains(card))
+                    .Sum(card => card.Definition.Level);
+                return "Select face-up field monsters: 1 Tuner + non-Tuners, Level " +
+                       selectedLevel + " / " + selectedSynchro.Level +
+                       ". The summon completes automatically when materials match.";
+            }
             switch (engine.Phase)
             {
                 case DuelPhase.Draw:
@@ -2460,7 +3771,8 @@ namespace DuelPrototype
                         int tributes = selectedHandCard.Definition.Level >= 7 ? 2 :
                             selectedHandCard.Definition.Level >= 5 ? 1 : 0;
                         if (tributes > 0)
-                            return "Select exactly " + tributes + " monster(s) as Tribute, then choose Summon or Set.";
+                            return "Select exactly " + tributes +
+                                   " of your monsters as Tribute, then choose Tribute Summon or Set.";
                     }
                     if (selectedHandCard != null &&
                         selectedHandCard.Definition.Effect == CardEffect.MysticBox &&
@@ -2515,19 +3827,24 @@ namespace DuelPrototype
             bool succeeded = action();
             if (succeeded)
             {
+                notice = "";
                 selectedHandCard = null;
+                selectedRitualMonster = null;
                 selectedMonsterCard = null;
                 selectedAttacker = null;
                 selectedTarget = null;
                 selectedMaterials.Clear();
                 selectedSynchro = null;
             }
+            else if (engine.Messages.Count > 0)
+                notice = engine.Messages[engine.Messages.Count - 1];
             Render();
         }
 
         private void ClearSelection()
         {
             selectedHandCard = null;
+            selectedRitualMonster = null;
             selectedMonsterCard = null;
             selectedAttacker = null;
             selectedTarget = null;
@@ -2541,13 +3858,16 @@ namespace DuelPrototype
                 .Count(card => card != null && card.CanBeMainDeck);
             int extraCount = profile.deck.Select(StarterCatalog.Find)
                 .Count(card => card != null && card.CanBeExtraDeck);
-            bool valid = mainCount >= 20 && mainCount <= 40 && extraCount <= 15;
+            bool withinCopyLimits = HasValidDeckCopyCounts(profile.deck.Select(StarterCatalog.Find));
+            bool valid = mainCount >= 20 && mainCount <= 40 && extraCount <= 15 && withinCopyLimits;
             AddText(contentRoot, "DECK BUILDER", 0.035f, 0.84f, 0.38f, 0.89f,
                 24, Color.white, TextAnchor.MiddleLeft, true);
             AddText(contentRoot, "MAIN " + mainCount + "/40     EXTRA " + extraCount + "/15",
                 0.44f, 0.845f, 0.7f, 0.89f, 13,
                 valid ? accentColor : new Color(1f, 0.65f, 0.32f), TextAnchor.MiddleRight, true);
-            AddText(contentRoot, valid ? "READY TO DUEL" : "MAIN DECK NEEDS 20–40 CARDS",
+            string deckStatus = valid ? "READY TO DUEL" :
+                !withinCopyLimits ? "CARD COPY LIMIT EXCEEDED" : "MAIN DECK NEEDS 20–40 CARDS";
+            AddText(contentRoot, deckStatus,
                 0.71f, 0.845f, 0.965f, 0.89f, 12,
                 valid ? accentColor : new Color(1f, 0.65f, 0.32f), TextAnchor.MiddleRight, true);
 
@@ -2700,9 +4020,10 @@ namespace DuelPrototype
                 AttachScrollWheelForwarder(row.gameObject, scroll);
             AttachCardHover(row, card);
             string kind = card.IsExtraDeckCard ? "EXTRA" : CardTypeLabel(card);
-            AddText(row, card.DisplayName + "\n" + kind + "  •  " + count + " copy/copies",
-                0.025f, 0.08f, 0.78f, 0.92f, 12, Color.white, TextAnchor.MiddleLeft, true);
-            AddButton(row, "−", 0.82f, 0.16f, 0.97f, 0.84f,
+            AddText(row, card.DisplayName + "\n" + kind + "  •  " +
+                count + "/" + card.MaxDeckCopies + " copies",
+                0.16f, 0.08f, 0.975f, 0.92f, 12, Color.white, TextAnchor.MiddleLeft, true);
+            AddButton(row, "−", 0.025f, 0.16f, 0.14f, 0.84f,
                 new Color(0.36f, 0.22f, 0.24f), () => ChangeDeck(card, -1), 15);
         }
 
@@ -2726,9 +4047,10 @@ namespace DuelPrototype
                 ? CardTypeLabel(card) + "  •  " + card.Level + "  •  " +
                   card.AttackDisplay + "/" + card.DefenseDisplay
                 : CardTypeLabel(card);
-            AddText(row, card.DisplayName + "\n" + details + "  •  OWNED " + owned + "  •  IN DECK " + inDeck,
-                0.025f, 0.08f, 0.82f, 0.92f, 11, Color.white, TextAnchor.MiddleLeft, true);
-            AddButton(row, "+", 0.86f, 0.16f, 0.97f, 0.84f,
+            AddText(row, card.DisplayName + "\n" + details + "  •  OWNED " + owned + "  •  IN DECK " +
+                inDeck + "/" + card.MaxDeckCopies,
+                0.16f, 0.08f, 0.82f, 0.92f, 11, Color.white, TextAnchor.MiddleLeft, true);
+            AddButton(row, "+", 0.025f, 0.16f, 0.14f, 0.84f,
                 new Color(0.14f, 0.38f, 0.34f), () => ChangeDeck(card, 1), 15);
         }
 
@@ -3171,8 +4493,8 @@ namespace DuelPrototype
             int extraCount = profile.deck.Select(StarterCatalog.Find).Count(item => item != null && item.CanBeExtraDeck);
             if (delta > 0)
             {
-                if (count >= 3)
-                    notice = "Copy limit reached (3 per card).";
+                if (count >= card.MaxDeckCopies)
+                    notice = "Copy limit reached (" + card.MaxDeckCopies + " per card).";
                 else if (count >= GetOwned(card.CardId))
                     notice = "You do not own another copy. Buy a pack in the Shop.";
                 else if (!card.CanBeMainDeck && !card.CanBeExtraDeck)
@@ -3196,6 +4518,13 @@ namespace DuelPrototype
             }
             SaveProfile();
             Render();
+        }
+
+        private static bool HasValidDeckCopyCounts(IEnumerable<CardDefinition> deck)
+        {
+            return deck != null && deck.All(card => card != null) &&
+                   deck.GroupBy(card => card.CardId, StringComparer.Ordinal)
+                       .All(group => group.Count() <= group.First().MaxDeckCopies);
         }
 
         private void DrawShopScreen()
@@ -3283,7 +4612,7 @@ namespace DuelPrototype
                 AddText(contentRoot, "The AI uses the same monster, Spell/Trap, Field, Graveyard, and Deck zones as a normal duel.",
                     0.06f, 0.24f, 0.94f, 0.39f, 20, Color.white, TextAnchor.MiddleCenter);
                 AddText(contentRoot, string.IsNullOrEmpty(notice)
-                        ? "Step advances one complete turn. Autoplay pauses between turns so you can follow the match."
+                        ? "Step advances one AI action. Autoplay plays actions in sequence and pauses between turns."
                         : notice,
                     0.06f, 0.16f, 0.94f, 0.23f, 14, mutedColor, TextAnchor.MiddleCenter);
                 return;
@@ -3298,21 +4627,25 @@ namespace DuelPrototype
                 16, Color.white, TextAnchor.MiddleLeft, true);
             if (!firstPlayerTurn && running)
                 DrawCurrentTurnLabel(0.095f, 0.75f, 0.195f, 0.79f);
-            DrawGraveyardButton(engine.Opponent, 0.205f, 0.75f);
-            DrawDeckButton(engine.Opponent, OpponentDeckX, 0.75f);
-            DrawBanishedIndicator(engine.Opponent, 0.205f, 0.59f);
-            DrawSpellTrapRow(engine.Opponent.SpellTrapZones, 0.75f);
+            DrawGraveyardButton(engine.Opponent, 0.205f, OpponentSpellTrapY);
+            DrawDeckButton(engine.Opponent, OpponentDeckX, OpponentSpellTrapY);
+            DrawBanishedIndicator(engine.Opponent, 0.205f, OpponentMonsterY);
+            DrawSpellTrapRow(engine.Opponent.SpellTrapZones, OpponentSpellTrapY);
             DrawFieldSpellSlot(engine.Opponent.FieldSpellZone, true);
-            DrawReadOnlyZones(engine.Opponent.MonsterZones, 0.59f);
-            DrawOpponentHandBacks();
+            DrawReadOnlyZones(engine.Opponent.MonsterZones, OpponentMonsterY);
+            DrawAiVisibleHand(engine.Opponent, true);
 
-            AddPanel(contentRoot, 0.025f, 0.55f, 0.975f, 0.59f, new Color(0.08f, 0.14f, 0.18f));
-            string status = engine.Phase == DuelPhase.GameOver
-                ? engine.Winner + " wins"
-                : "TURN " + engine.TurnNumber + "  •  " + engine.CurrentPlayer.Name + "  •  " + engine.PhaseLabel;
-            AddText(contentRoot, status, 0.035f, 0.55f, 0.965f, 0.59f, 14,
-                accentColor, TextAnchor.MiddleCenter, true);
-            AddButton(contentRoot, "STEP 1 TURN", 0.025f, 0.505f, 0.18f, 0.545f,
+            AddPanel(contentRoot, 0.025f, 0.465f, 0.195f, 0.565f,
+                Color.Lerp(panelColor, GetTurnColor(firstPlayerTurn), 0.3f));
+            AddText(contentRoot, "TURN " + engine.TurnNumber + "  •  " + engine.CurrentPlayer.Name,
+                0.03f, 0.535f, 0.19f, 0.558f, 9, accentColor, TextAnchor.MiddleCenter, true);
+            AddText(contentRoot, engine.Phase == DuelPhase.GameOver
+                    ? engine.Winner + " WINS"
+                    : engine.PhaseLabel.ToUpperInvariant(),
+                0.03f, 0.476f, 0.19f, 0.53f, 10, Color.white, TextAnchor.MiddleCenter, true);
+
+            AddButton(contentRoot, "STEP",
+                0.855f, 0.705f, 0.975f, 0.74f,
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
                     if (running)
@@ -3320,44 +4653,40 @@ namespace DuelPrototype
                         engine.StepAiTurn();
                         Render();
                     }
-                }, 11);
+                }, 10);
             AddButton(contentRoot, "PACE " + aiAutoplayPaces[aiAutoplayPaceIndex].ToString("0") + "s",
-                0.19f, 0.505f, 0.34f, 0.545f, new Color(0.2f, 0.34f, 0.46f), () =>
+                0.855f, 0.665f, 0.975f, 0.7f,
+                new Color(0.2f, 0.34f, 0.46f), () =>
                 {
                     aiAutoplayPaceIndex = (aiAutoplayPaceIndex + 1) % aiAutoplayPaces.Length;
-                    if (aiAutoplay)
-                        nextAiStepTime = Time.unscaledTime + aiAutoplayPaces[aiAutoplayPaceIndex];
                     Render();
-                }, 11);
-            AddButton(contentRoot, aiAutoplay ? "PAUSE AUTO" : "AUTO PLAY",
-                0.35f, 0.505f, 0.52f, 0.545f, new Color(0.44f, 0.24f, 0.56f), () =>
-                {
-                    if (running)
-                    {
-                        aiAutoplay = !aiAutoplay;
-                        nextAiStepTime = Time.unscaledTime + aiAutoplayPaces[aiAutoplayPaceIndex];
-                    }
-                    Render();
-                }, 11);
-            AddButton(contentRoot, "HANDS", 0.53f, 0.505f, 0.68f, 0.545f,
+                }, 10);
+            AddText(contentRoot, aiAutoplay ? "SPACE: PAUSE AUTO" : "SPACE: START AUTO",
+                0.855f, 0.625f, 0.975f, 0.66f, 9,
+                aiAutoplay ? new Color(1f, 0.78f, 0.35f) : mutedColor,
+                TextAnchor.MiddleCenter, true);
+            AddButton(contentRoot, "HANDS",
+                0.855f, 0.585f, 0.975f, 0.62f,
                 new Color(0.15f, 0.42f, 0.4f), () =>
                 {
                     aiHandsOpen = true;
                     Render();
-                }, 11);
-            AddButton(contentRoot, "SELECT DECKS", 0.69f, 0.505f, 0.83f, 0.545f,
+                }, 10);
+            AddButton(contentRoot, "SELECT DECKS",
+                0.855f, 0.545f, 0.975f, 0.58f,
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
                     aiAutoplay = false;
                     engine = null;
                     aiHandsOpen = false;
                     Render();
-                }, 11);
-            AddButton(contentRoot, "RESET MATCH", 0.84f, 0.505f, 0.975f, 0.545f,
-                new Color(0.36f, 0.22f, 0.24f), StartAiMatch, 11);
+                }, 9);
+            AddButton(contentRoot, "RESET",
+                0.855f, 0.505f, 0.975f, 0.54f,
+                new Color(0.36f, 0.22f, 0.24f), StartAiMatch, 10);
 
-            DrawReadOnlyZones(engine.Human.MonsterZones, 0.35f);
-            DrawSpellTrapRow(engine.Human.SpellTrapZones, 0.19f);
+            DrawReadOnlyZones(engine.Human.MonsterZones, HumanMonsterY);
+            DrawSpellTrapRow(engine.Human.SpellTrapZones, HumanSpellTrapY);
             DrawFieldSpellSlot(engine.Human.FieldSpellZone, false);
             DrawPlayerPortrait("P1", 0.025f, 0.2f, 0.085f, 0.296f,
                 new Color(0.12f, 0.36f, 0.4f), firstPlayerTurn);
@@ -3366,20 +4695,31 @@ namespace DuelPrototype
                 17, Color.white, TextAnchor.MiddleLeft, true);
             if (firstPlayerTurn)
                 DrawCurrentTurnLabel(0.095f, 0.3f, 0.195f, 0.34f);
-            DrawDeckButton(engine.Human, 0.205f, 0.19f);
-            DrawBanishedIndicator(engine.Human, 0.74f, 0.35f);
-            DrawGraveyardButton(engine.Human, 0.74f, 0.19f);
+            DrawDeckButton(engine.Human, 0.205f, HumanSpellTrapY);
+            DrawBanishedIndicator(engine.Human, 0.74f, HumanMonsterY);
+            DrawGraveyardButton(engine.Human, 0.74f, HumanSpellTrapY);
+            DrawAiVisibleHand(engine.Human, false);
             AddText(contentRoot, string.Join("\n", engine.Messages.Reverse().Take(3).Reverse()),
-                0.025f, 0.005f, 0.975f, 0.035f, 10, mutedColor, TextAnchor.MiddleLeft);
+                0.025f, 0.14f, 0.975f, 0.175f, 10, mutedColor, TextAnchor.MiddleLeft);
         }
 
         private void DrawTestLabSetupScreen()
         {
             List<CardDefinition> candidates = StarterCatalog.All
                 .Where(card => card != null && !string.IsNullOrWhiteSpace(card.CardId) &&
+                    (showFailedUnitTests || IsTestCardPassing(card)) &&
                     MatchesTestCardFilters(card, TestLabFilter.None))
                 .OrderBy(card => card.DisplayName, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+            List<CardDefinition> importedCards = StarterCatalog.All
+                .Take(StarterCatalog.ImportedCardCount)
+                .Where(card => card != null)
+                .ToList();
+            int passingTestCount = importedCards.Count(IsTestCardPassing);
+            int totalUnitTests = StarterCatalog.ImportedCardCount;
+            int passingPercent = totalUnitTests == 0
+                ? 0
+                : Mathf.RoundToInt(passingTestCount * 100f / totalUnitTests);
             const int pageSize = 20;
             int pageCount = Mathf.Max(1, Mathf.CeilToInt(candidates.Count / (float)pageSize));
             testCardPage = Mathf.Clamp(testCardPage, 0, pageCount - 1);
@@ -3400,9 +4740,19 @@ namespace DuelPrototype
             DrawTestFilterButton(TestLabFilter.FrameType, 0.025f, 0.695f, 0.17f, 0.74f);
             DrawTestFilterButton(TestLabFilter.Level, 0.18f, 0.695f, 0.325f, 0.74f);
             DrawTestFilterButton(TestLabFilter.CardSet, 0.335f, 0.695f, 0.475f, 0.74f);
-            AddText(contentRoot, candidates.Count + " matching cards  •  scroll to load more  •  page " +
-                (testCardPage + 1) + "/" + pageCount, 0.025f, 0.66f, 0.475f, 0.69f,
-                10, mutedColor, TextAnchor.MiddleLeft);
+            AddButton(contentRoot, (showFailedUnitTests ? "[x] " : "[ ] ") + "Show Failed Unit Tests",
+                0.025f, 0.655f, 0.235f, 0.69f,
+                showFailedUnitTests ? accentColor : new Color(0.16f, 0.24f, 0.33f),
+                () =>
+                {
+                    showFailedUnitTests = !showFailedUnitTests;
+                    testCardPage = 0;
+                    testCardScrollPosition = 1f;
+                    Render();
+                }, 8);
+            AddText(contentRoot, passingTestCount + " / " + totalUnitTests +
+                " unit tests passed  •  " + passingPercent + "%",
+                0.24f, 0.655f, 0.475f, 0.69f, 9, accentColor, TextAnchor.MiddleRight, true);
 
             RectTransform testListViewport = AddPanel(contentRoot, 0.025f, 0.17f, 0.475f, 0.65f, panelColor);
             testListViewport.gameObject.AddComponent<Mask>().showMaskGraphic = true;
@@ -3495,7 +4845,11 @@ namespace DuelPrototype
             DrawTestFixtureButton("OPPONENT MONSTER", MockDuelFixtures.OpponentMonster, 0.755f, 0.35f);
             DrawTestFixtureButton("OPPONENT SET TRAP", MockDuelFixtures.OpponentSetTrap, 0.525f, 0.29f);
             DrawTestFixtureButton("PLAYER GY MONSTER", MockDuelFixtures.PlayerGraveyardMonster, 0.755f, 0.29f);
-            AddText(contentRoot, "The focused card starts in your hand; the CPU opponent still takes normal turns.",
+            string setupHint = selectedTestCard != null &&
+                selectedTestCard.Effect == CardEffect.BlackwingSpecialSummon
+                ? "The focused card starts in your hand; another Blackwing is added to your field automatically."
+                : "The focused card starts in your hand; the CPU opponent still takes normal turns.";
+            AddText(contentRoot, setupHint,
                 0.525f, 0.235f, 0.95f, 0.28f, 10, mutedColor, TextAnchor.MiddleLeft);
 
             string startLabel = selectedTestCard == null ? "SELECT A CARD" : "START UNIT TEST";
@@ -3679,6 +5033,11 @@ namespace DuelPrototype
                    definition.Kind == CardKind.Trap;
         }
 
+        private static bool IsTestCardPassing(CardDefinition definition)
+        {
+            return definition.Effect != CardEffect.None || !RequiresEffectResolver(definition);
+        }
+
         private static string TestEffectStatusLabel(CardDefinition definition)
         {
             if (definition.Effect != CardEffect.None)
@@ -3860,12 +5219,12 @@ namespace DuelPrototype
                 }, 12);
 
             AddText(contentRoot, engine.Opponent.Name + "  •  " + engine.Opponent.Hand.Count +
-                " cards  •  face-down", 0.14f, 0.69f, 0.86f, 0.75f,
+                " cards  •  revealed", 0.14f, 0.69f, 0.86f, 0.75f,
                 15, Color.white, TextAnchor.MiddleLeft, true);
-            DrawAiHandRow(engine.Opponent, true, 0.43f, 0.68f);
+            DrawAiHandRow(engine.Opponent, false, 0.43f, 0.68f);
 
             AddText(contentRoot, engine.Human.Name + "  •  " + engine.Human.Hand.Count +
-                " cards  •  face-up", 0.14f, 0.35f, 0.86f, 0.41f,
+                " cards  •  revealed", 0.14f, 0.35f, 0.86f, 0.41f,
                 15, Color.white, TextAnchor.MiddleLeft, true);
             DrawAiHandRow(engine.Human, false, 0.17f, 0.34f);
         }
@@ -3953,15 +5312,19 @@ namespace DuelPrototype
             {
                 float x = MonsterCardStartX + i * MonsterCardStepX;
                 CardInstance card = zones[i];
-                string label = card == null ? "MONSTER\nSLOT" : CardLabel(card, true);
-                Color zoneColor = card == null ? new Color(0.09f, 0.13f, 0.18f) : CardZoneColor(card);
+                CardInstance displayedCard = card != null && animatingCardArrivals.Contains(card) ? null : card;
+                string label = displayedCard == null ? "MONSTER\nSLOT" : CardLabel(displayedCard, true);
+                Color zoneColor = displayedCard == null
+                    ? new Color(0.09f, 0.13f, 0.18f)
+                    : CardZoneColor(displayedCard);
                 RectTransform slot = AddButton(contentRoot, label, x, y, x + BoardCardWidth, y + BoardCardHeight,
                     zoneColor, () => { }, 10,
-                    card != null && card.FaceUp ? card.Definition : null);
-                AddCardArtPlaceholder(slot, card != null && card.FaceUp ? card.Definition : null,
-                    0f, 0f, 1f, 1f, card == null || card.FaceUp);
-                RotateDefenseMonster(slot, card);
-                FitMonsterSlotStats(slot, card);
+                    displayedCard != null && displayedCard.FaceUp ? displayedCard.Definition : null);
+                AddCardArtPlaceholder(slot,
+                    displayedCard != null && displayedCard.FaceUp ? displayedCard.Definition : null,
+                    0f, 0f, 1f, 1f, displayedCard == null || displayedCard.FaceUp);
+                RotateDefenseMonster(slot, displayedCard);
+                FitMonsterSlotStats(slot, displayedCard);
             }
         }
 
@@ -4102,23 +5465,28 @@ namespace DuelPrototype
             }
         }
 
-        private void UpdateCreditsText()
-        {
-            if (creditsText != null)
-                creditsText.text = profile.credits + " CR";
-        }
-
         private void AttachCardHover(RectTransform rect, CardDefinition definition)
         {
             if (rect == null || definition == null)
                 return;
             EventTrigger trigger = rect.gameObject.AddComponent<EventTrigger>();
             EventTrigger.Entry enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
-            enter.callback.AddListener(data => ShowCardPreview(definition, data as PointerEventData));
+            enter.callback.AddListener(data =>
+            {
+                if (screen != ScreenMode.Duel)
+                    ShowCardPreview(definition, data as PointerEventData);
+            });
             trigger.triggers.Add(enter);
             EventTrigger.Entry exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
             exit.callback.AddListener(_ => HideCardPreview());
             trigger.triggers.Add(exit);
+
+            RightClickAction rightClick = rect.gameObject.AddComponent<RightClickAction>();
+            rightClick.OnRightClickWithEventData = eventData =>
+            {
+                if (screen == ScreenMode.Duel)
+                    ShowCardPreview(definition, eventData);
+            };
         }
 
         private void ShowCardPreview(CardDefinition definition, PointerEventData eventData)
@@ -4388,18 +5756,19 @@ namespace DuelPrototype
 
         private static float GetPortraitHeight(float normalizedWidth)
         {
-            float screenAspect = Screen.width > 0 && Screen.height > 0
-                ? (float)Screen.width / Screen.height
-                : 16f / 9f;
-            return normalizedWidth * screenAspect * 7f / 5f;
+            return normalizedWidth * GetScreenAspectRatio() * 7f / 5f;
         }
 
         private static float GetPortraitWidth(float normalizedHeight)
         {
-            float screenAspect = Screen.width > 0 && Screen.height > 0
+            return normalizedHeight * 5f / 7f / GetScreenAspectRatio();
+        }
+
+        private static float GetScreenAspectRatio()
+        {
+            return Screen.width > 0 && Screen.height > 0
                 ? (float)Screen.width / Screen.height
                 : 16f / 9f;
-            return normalizedHeight * 5f / 7f / screenAspect;
         }
 
         private Image AddCardArtPlaceholder(

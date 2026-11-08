@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -23,12 +23,15 @@ namespace DuelPrototype
         public bool HasAttacked { get; set; }
         public bool HasChangedPositionThisTurn { get; set; }
         public bool EffectUsedThisTurn { get; set; }
+        public bool EffectsNegated { get; set; }
         public int AttackBonus { get; set; }
         public int PermanentAttackBonus { get; set; }
         public int SummonedTurnNumber { get; set; }
         public int SpellCounters { get; set; }
         public int DestroyedOnFieldTurn { get; set; }
         public int EffectDurationTurnsRemaining { get; set; }
+        public int DestroyAtEndPhaseTurn { get; set; }
+        public bool BanishWhenLeavingField { get; set; }
         public List<CardInstance> FusionMaterials { get; } = new List<CardInstance>();
         public CardInstance EquippedMonster { get; set; }
         public int CurrentAttack => Definition.Attack + AttackBonus + PermanentAttackBonus;
@@ -91,8 +94,12 @@ namespace DuelPrototype
         private CardInstance pendingResponseSourceCard;
         private CardInstance responseEffectAwaitingDiscard;
         private int chainLinkCount;
-        private DuelPlayer pendingSanganOwner;
-        private CardInstance pendingSanganSource;
+        private DuelPlayer pendingDeckChoiceOwner;
+        private CardInstance pendingDeckChoiceSource;
+        private Func<CardInstance, bool> pendingDeckChoiceFilter;
+        private string pendingDeckChoicePrompt;
+        private bool pendingDeckChoiceToGraveyard;
+        private bool pendingDeckChoiceSanganRestriction;
         private DuelPlayer temporarilyDisabledCardOwner;
         private string temporarilyDisabledCardName;
         private int temporarilyDisabledCardTurn;
@@ -102,24 +109,29 @@ namespace DuelPrototype
         public DuelPlayer CurrentPlayer { get; private set; }
         public DuelPhase Phase { get; private set; }
         public bool IsAiVsAi { get; private set; }
+        public bool HasPendingAiActions => pendingAiActionIndex < pendingAiActions.Count;
         public event Action<DuelPhase> PhaseChanged;
         public event Action<CardInstance, CardInstance> AttackDeclared;
         public event Action<DuelPlayer, CardInstance> CardDrawn;
+        public event Action<DuelPlayer, CardInstance, IReadOnlyList<CardInstance>> TributeSummoned;
         public bool CanAttackThisTurn => turnNumber > 1;
         public string AttackRestrictionMessage => CanAttackThisTurn ? "" :
             "The first player cannot attack during the first turn of the duel.";
         public int TurnNumber => turnNumber;
         public string Winner { get; private set; }
         public IReadOnlyList<string> Messages => messages;
-        public bool SearchChoiceOpen => pendingSanganOwner != null;
+        public bool SearchChoiceOpen => pendingDeckChoiceOwner != null;
         public string SearchChoicePrompt => SearchChoiceOpen
-            ? pendingSanganSource.Definition.DisplayName +
-              " was sent from the field to the Graveyard. Choose a monster with 1500 or less ATK."
+            ? pendingDeckChoicePrompt
             : "";
+        public string SearchChoiceTitle => SearchChoiceOpen
+            ? pendingDeckChoiceSource.Definition.DisplayName + " — CHOOSE A CARD"
+            : "";
+        public string SearchChoiceActionLabel => pendingDeckChoiceToGraveyard
+            ? "SEND SELECTED CARD TO GRAVEYARD"
+            : "ADD SELECTED CARD TO HAND";
         public IReadOnlyList<CardInstance> AvailableSearchCards => SearchChoiceOpen
-            ? pendingSanganOwner.Deck.Where(card => card.Definition.IsMonster &&
-                card.Definition.CanBeMainDeck &&
-                card.Definition.Attack <= 1500).ToList()
+            ? pendingDeckChoiceOwner.Deck.Where(pendingDeckChoiceFilter).ToList()
             : new List<CardInstance>();
         public bool ResponseWindowOpen => pendingResponsePass != null;
         public bool ResponseDiscardChoiceOpen => responseEffectAwaitingDiscard != null;
@@ -165,7 +177,8 @@ namespace DuelPrototype
             IReadOnlyList<CardDefinition> aiDeck,
             bool aiVsAi = false,
             string firstPlayerName = "DUELIST",
-            string secondPlayerName = "CPU RIVAL")
+            string secondPlayerName = "CPU RIVAL",
+            bool humanGoesFirst = true)
         {
             if (humanDeck == null || humanDeck.Count < 20)
                 throw new ArgumentException("A duel deck must contain at least 20 cards.", nameof(humanDeck));
@@ -184,8 +197,7 @@ namespace DuelPrototype
             pendingResponseSourceCard = null;
             responseEffectAwaitingDiscard = null;
             chainLinkCount = 0;
-            pendingSanganOwner = null;
-            pendingSanganSource = null;
+            ClearDeckChoice();
             temporarilyDisabledCardOwner = null;
             temporarilyDisabledCardName = null;
             temporarilyDisabledCardTurn = 0;
@@ -196,10 +208,15 @@ namespace DuelPrototype
             Opponent = MakePlayer(secondPlayerName, true, aiDeck);
             DrawInitialHand(Human);
             DrawInitialHand(Opponent);
-            BeginTurn(Human);
+            DuelPlayer firstPlayer = humanGoesFirst ? Human : Opponent;
+            BeginTurn(firstPlayer);
+            if (firstPlayer == Opponent)
+                RunAiTurnActions(Opponent);
             Log(aiVsAi
                 ? "AI vs AI test started. Step turns manually or enable autoplay."
-                : "Your turn. Choose an action, or advance through the phases.");
+                : firstPlayer == Human
+                    ? "Your turn. Choose an action, or advance through the phases."
+                    : Opponent.Name + " goes first.");
         }
 
         public DuelStateSnapshot CaptureState()
@@ -415,7 +432,11 @@ namespace DuelPrototype
             return instanceId;
         }
 
-        public bool TryNormalSummon(CardInstance card, IReadOnlyList<CardInstance> tributes, bool setFaceDown = false)
+        public bool TryNormalSummon(
+            CardInstance card,
+            IReadOnlyList<CardInstance> tributes,
+            bool setFaceDown = false,
+            int preferredMonsterZone = -1)
         {
             if (!CanActInMainPhase())
                 return Reject("Normal Summons are only available during your Main Phase.");
@@ -424,15 +445,42 @@ namespace DuelPrototype
             if (card.Definition.Effect == CardEffect.Berserkion ||
                 card.Definition.Effect == CardEffect.Valkyrion)
                 return Reject("This monster must be Special Summoned using its card-specific materials.");
-            if (CurrentPlayer.NormalSummonsThisTurn >= 1)
-                return Reject("You have already used your Normal Summon this turn.");
             if (CurrentPlayer.SummonsLockedThisTurn)
                 return Reject("A card effect prevents you from Summoning monsters this turn.");
+            bool siroccoNoTribute = card.Definition.Effect == CardEffect.BlackwingSiroccoBoost &&
+                !CurrentPlayer.MonsterZones.Any(monster => monster != null) &&
+                GetOpponent(CurrentPlayer).MonsterZones.Any(monster => monster != null);
+            if (!setFaceDown && (tributes == null || tributes.Count == 0))
+            {
+                bool blackwingSpecialSummon = card.Definition.Effect == CardEffect.BlackwingSpecialSummon &&
+                    CurrentPlayer.MonsterZones.Any(monster => monster != null && monster.FaceUp &&
+                        IsBlackwing(monster.Definition));
+                bool cyberDragonSpecialSummon = card.Definition.Effect == CardEffect.CyberDragonSummon &&
+                    GetOpponent(CurrentPlayer).MonsterZones.Count(monster => monster != null) >
+                    CurrentPlayer.MonsterZones.Count(monster => monster != null);
+                if (blackwingSpecialSummon || cyberDragonSpecialSummon)
+                {
+                    int specialSummonZone = preferredMonsterZone >= 0
+                        ? preferredMonsterZone
+                        : FindEmptyMonsterZone(CurrentPlayer);
+                    if (specialSummonZone < 0 ||
+                        (specialSummonZone >= CurrentPlayer.MonsterZones.Length) ||
+                        (CurrentPlayer.MonsterZones[specialSummonZone] != null))
+                        return Reject("Your Monster Zones are full or the selected zone is occupied.");
+                    PlaceSpecialSummon(CurrentPlayer, card, specialSummonZone, true);
+                    OpenResponseWindow(GetOpponent(CurrentPlayer), CardEffect.DestroyAllMonsters, card,
+                        () => { }, DestroyAllMonstersOnField);
+                    return true;
+                }
+            }
+            if (CurrentPlayer.NormalSummonsThisTurn >= 1)
+                return Reject("You have already used your Normal Summon this turn.");
             if (FindEmptyMonsterZone(CurrentPlayer) < 0 && !CurrentPlayer.MonsterZones.Any(material =>
                     material != null && tributes != null && tributes.Contains(material)))
                 return Reject("Your Monster Zones are full.");
 
-            int tributeCount = card.Definition.Level >= 7 ? 2 : card.Definition.Level >= 5 ? 1 : 0;
+            int tributeCount = siroccoNoTribute ? 0 :
+                card.Definition.Level >= 7 ? 2 : card.Definition.Level >= 5 ? 1 : 0;
             List<CardInstance> selectedTributes = tributes == null ? new List<CardInstance>() : tributes.Distinct().ToList();
             if (selectedTributes.Count != tributeCount ||
                 selectedTributes.Any(material => !CurrentPlayer.MonsterZones.Contains(material)))
@@ -442,7 +490,13 @@ namespace DuelPrototype
             if (SearchChoiceOpen)
                 return Reject("Resolve Sangan's Deck search before taking another action.");
 
-            int zone = FindEmptyMonsterZone(CurrentPlayer);
+            int zone = preferredMonsterZone;
+            if (zone >= 0 && (zone >= CurrentPlayer.MonsterZones.Length ||
+                              (CurrentPlayer.MonsterZones[zone] != null &&
+                               !selectedTributes.Contains(CurrentPlayer.MonsterZones[zone]))))
+                return Reject("That Monster Zone is occupied.");
+            if (zone < 0)
+                zone = FindEmptyMonsterZone(CurrentPlayer);
             if (zone < 0 && selectedTributes.Count == 0)
                 return Reject("Your Monster Zones are full.");
             foreach (CardInstance tribute in selectedTributes)
@@ -457,12 +511,18 @@ namespace DuelPrototype
             card.SummonedTurnNumber = turnNumber;
             CurrentPlayer.NormalSummonsThisTurn++;
             Log(CurrentPlayer.Name + (setFaceDown ? " Set " : " Normal Summoned ") + card.Definition.DisplayName + ".");
+            if (!setFaceDown && selectedTributes.Count > 0)
+                TributeSummoned?.Invoke(CurrentPlayer, card, selectedTributes);
             if (!setFaceDown)
+            {
                 ResolveSummonTriggers(CurrentPlayer, card, true);
+                OpenResponseWindow(GetOpponent(CurrentPlayer), CardEffect.DestroyAllMonsters, card,
+                    () => { }, DestroyAllMonstersOnField);
+            }
             return true;
         }
 
-        public bool TrySpecialSummonBoss(CardInstance card)
+        public bool TrySpecialSummonBoss(CardInstance card, int preferredMonsterZone = -1)
         {
             if (!CanActInMainPhase())
                 return Reject("Special Summons are only available during your Main Phase.");
@@ -471,7 +531,13 @@ namespace DuelPrototype
                 return Reject("Select Berserkion or Valkyrion in your hand.");
             if (CurrentPlayer.SummonsLockedThisTurn)
                 return Reject("A card effect prevents you from Summoning monsters this turn.");
-            if (FindEmptyMonsterZone(CurrentPlayer) < 0)
+            int summonZone = preferredMonsterZone;
+            if (summonZone >= 0 &&
+                (summonZone >= CurrentPlayer.MonsterZones.Length || CurrentPlayer.MonsterZones[summonZone] != null))
+                return Reject("That Monster Zone is occupied.");
+            if (summonZone < 0)
+                summonZone = FindEmptyMonsterZone(CurrentPlayer);
+            if (summonZone < 0)
                 return Reject("Your Monster Zones are full.");
 
             bool berserkion = card.Definition.Effect == CardEffect.Berserkion;
@@ -508,12 +574,64 @@ namespace DuelPrototype
             card.FaceUp = true;
             card.AttackPosition = true;
             card.SummonedTurnNumber = turnNumber;
-            CurrentPlayer.MonsterZones[FindEmptyMonsterZone(CurrentPlayer)] = card;
+            CurrentPlayer.MonsterZones[summonZone] = card;
             Log(CurrentPlayer.Name + " Special Summoned " + card.Definition.DisplayName + ".");
             return true;
         }
 
-        public bool TrySetBackrow(CardInstance card)
+        public bool TryRitualSummon(CardInstance ritualMonster, IReadOnlyList<CardInstance> materials)
+        {
+            if (!CanActInMainPhase())
+                return Reject("Ritual Summons are only available during your Main Phase.");
+            if (CurrentPlayer.SummonsLockedThisTurn)
+                return Reject("A card effect prevents you from Special Summoning this turn.");
+            if (ritualMonster == null || !CurrentPlayer.Hand.Contains(ritualMonster) ||
+                !ritualMonster.Definition.IsRitualMonster)
+                return Reject("Select a Ritual Monster from your hand.");
+
+            CardInstance ritualSpell = CurrentPlayer.Hand.FirstOrDefault(card =>
+                card.Definition.Kind == CardKind.Spell && card.Definition.Subtype == CardSubtype.Ritual);
+            if (ritualSpell == null)
+                return Reject("You need a Ritual Spell in your hand.");
+
+            List<CardInstance> chosen = materials == null
+                ? new List<CardInstance>()
+                : materials.Distinct().ToList();
+            if (chosen.Count == 0 || chosen.Any(card => card == null || card == ritualMonster ||
+                    (!CurrentPlayer.Hand.Contains(card) && !CurrentPlayer.MonsterZones.Contains(card)) ||
+                    !card.Definition.IsMonster))
+                return Reject("Select Ritual Materials from your hand or Monster Zones.");
+            if (chosen.Sum(card => card.Definition.Level) < ritualMonster.Definition.Level)
+                return Reject("Your Ritual Materials must have total Levels at least equal to the Ritual Monster.");
+
+            int summonZone = FindEmptyMonsterZone(CurrentPlayer);
+            if (summonZone < 0)
+                summonZone = Array.FindIndex(CurrentPlayer.MonsterZones, chosen.Contains);
+            if (summonZone < 0)
+                return Reject("Ritual Summoning needs an open Monster Zone after using its materials.");
+
+            foreach (CardInstance material in chosen)
+            {
+                CurrentPlayer.Hand.Remove(material);
+                if (CurrentPlayer.MonsterZones.Contains(material))
+                    SendMonsterToGraveyard(CurrentPlayer, material);
+                else
+                    CurrentPlayer.Graveyard.Add(material);
+            }
+
+            CurrentPlayer.Hand.Remove(ritualSpell);
+            CurrentPlayer.Graveyard.Add(ritualSpell);
+            CurrentPlayer.Hand.Remove(ritualMonster);
+            ritualMonster.FaceUp = true;
+            ritualMonster.AttackPosition = true;
+            ritualMonster.SummonedTurnNumber = turnNumber;
+            CurrentPlayer.MonsterZones[summonZone] = ritualMonster;
+            Log(CurrentPlayer.Name + " Ritual Summoned " + ritualMonster.Definition.DisplayName + ".");
+            ResolveSummonTriggers(CurrentPlayer, ritualMonster, false);
+            return true;
+        }
+
+        public bool TrySetBackrow(CardInstance card, int preferredSpellTrapZone = -1)
         {
             if (!CanActInMainPhase())
                 return Reject("You can only Set cards during your Main Phase.");
@@ -523,7 +641,12 @@ namespace DuelPrototype
             if (card.Definition.Kind == CardKind.Spell && card.Definition.Subtype == CardSubtype.Field)
                 return Reject("Activate Field Spells directly into the dedicated Field Spell Zone.");
 
-            int slot = FindEmptySpellTrapZone(CurrentPlayer);
+            int slot = preferredSpellTrapZone;
+            if (slot >= 0 && (slot >= CurrentPlayer.SpellTrapZones.Length ||
+                              CurrentPlayer.SpellTrapZones[slot] != null))
+                return Reject("That Spell & Trap Zone is occupied.");
+            if (slot < 0)
+                slot = FindEmptySpellTrapZone(CurrentPlayer);
             if (slot < 0)
                 return Reject("Your Spell & Trap Zones are full.");
             CurrentPlayer.Hand.Remove(card);
@@ -597,6 +720,91 @@ namespace DuelPrototype
                     "Berfomet searched Gazelle.");
                 summoned.EffectUsedThisTurn = true;
             }
+
+            switch (summoned.Definition.Effect)
+            {
+                case CardEffect.BlackwingRevive:
+                    if (normalSummon)
+                        SpecialSummonFromGraveyard(owner, owner.Graveyard.FirstOrDefault(item =>
+                            IsBlackwing(item.Definition) && item.Definition.Level <= 4), false);
+                    break;
+                case CardEffect.DebrisDragonRevive:
+                    if (normalSummon)
+                    {
+                        CardInstance debrisTarget = owner.Graveyard.FirstOrDefault(item =>
+                            item.Definition.IsMonster && item.Definition.Attack <= 500);
+                        if (SpecialSummonFromGraveyard(owner, debrisTarget, true) && debrisTarget != null)
+                            debrisTarget.EffectsNegated = true;
+                    }
+                    break;
+                case CardEffect.JunkSynchronRevive:
+                    if (normalSummon)
+                        SpecialSummonFromGraveyard(owner, owner.Graveyard.FirstOrDefault(item =>
+                            item.Definition.IsMonster && item.Definition.Level <= 2), false);
+                    break;
+                case CardEffect.SynchronExplorer:
+                    if (normalSummon)
+                        SpecialSummonFromGraveyard(owner, owner.Graveyard.FirstOrDefault(item =>
+                            item.Definition.DisplayName.IndexOf("Synchron", StringComparison.OrdinalIgnoreCase) >= 0),
+                            true);
+                    break;
+                case CardEffect.FormulaSynchronDraw:
+                    DrawCard(owner);
+                    break;
+                case CardEffect.AncientFairyDragon:
+                    DrawCard(owner);
+                    break;
+                case CardEffect.JunkWarriorBoost:
+                    summoned.AttackBonus += owner.MonsterZones
+                        .Where(item => item != null && item != summoned && item.Definition.Level <= 2)
+                        .Sum(item => item.CurrentAttack);
+                    break;
+                case CardEffect.LifeStreamSetLifePoints:
+                    owner.LifePoints = 4000;
+                    break;
+                case CardEffect.BlackRoseDragon:
+                    foreach (CardInstance fieldCard in GetAllFieldCards())
+                        DestroyFieldCard(fieldCard);
+                    CheckWinner();
+                    break;
+                case CardEffect.BlackwingSilverwind:
+                    foreach (CardInstance monster in Human.MonsterZones.Concat(Opponent.MonsterZones)
+                                 .Where(item => item != null && item != summoned && item.FaceUp &&
+                                                item.Definition.Defense < summoned.CurrentAttack)
+                                 .Take(2).ToList())
+                        DestroyFieldCard(monster);
+                    CheckWinner();
+                    break;
+            }
+
+            if (normalSummon && IsBlackwing(summoned.Definition))
+            {
+                CardInstance blackWhirlwind = owner.SpellTrapZones.FirstOrDefault(item =>
+                    item != null && item.FaceUp &&
+                    item.Definition.Effect == CardEffect.BlackWhirlwindSearch);
+                CardInstance searched = blackWhirlwind == null ? null : owner.Deck
+                    .Where(item => IsBlackwing(item.Definition) &&
+                                   item.Definition.Attack < summoned.Definition.Attack)
+                    .OrderByDescending(item => item.Definition.Attack)
+                    .FirstOrDefault();
+                if (searched != null)
+                {
+                    owner.Deck.Remove(searched);
+                    owner.Hand.Add(searched);
+                    Log(owner.Name + " searched " + searched.Definition.DisplayName +
+                        " with Black Whirlwind.");
+                }
+            }
+        }
+
+        private bool SpecialSummonFromGraveyard(DuelPlayer owner, CardInstance card, bool attackPosition)
+        {
+            int zone = FindEmptyMonsterZone(owner);
+            if (card == null || zone < 0 || !owner.Graveyard.Contains(card) ||
+                owner.SummonsLockedThisTurn)
+                return false;
+            PlaceSpecialSummon(owner, card, zone, attackPosition);
+            return true;
         }
 
         private void AddDeckCardToHand(DuelPlayer owner, Predicate<CardInstance> predicate, string message)
@@ -652,6 +860,8 @@ namespace DuelPrototype
             }
             if (monsterEffect && card.EffectUsedThisTurn)
                 return Reject("That monster's effect has already been used this turn.");
+            if (monsterEffect && card.EffectsNegated)
+                return Reject("That monster's effects are negated.");
             if (IsCardEffectActivationRestricted(CurrentPlayer, card.Definition))
                 return Reject("You cannot activate " + temporarilyDisabledCardName +
                     " or its effects for the rest of this turn.");
@@ -667,6 +877,84 @@ namespace DuelPrototype
             if (card.Definition.Effect == CardEffect.DestroyWeakest &&
                 !GetOpponent(CurrentPlayer).MonsterZones.Any(monster => monster != null))
                 return Reject("The opponent has no monster to destroy.");
+            if (card.Definition.Effect == CardEffect.SearchDeckToHand &&
+                !CurrentPlayer.Deck.Any(candidate => MatchesDeckEffectFilter(card.Definition, candidate)))
+                return Reject("There are no cards in your Deck that match this search.");
+            if (card.Definition.Effect == CardEffect.SendMonsterFromDeckToGraveyard &&
+                !CurrentPlayer.Deck.Any(candidate => MatchesDeckEffectFilter(card.Definition, candidate)))
+                return Reject("There are no eligible monsters in your Deck to send to the Graveyard.");
+            if (card.Definition.Effect == CardEffect.DiscardOneDestroyFaceUpOpponentMonsters &&
+                (CurrentPlayer.Hand.Count < 2 ||
+                 !GetOpponent(CurrentPlayer).MonsterZones.Any(monster => monster != null && monster.FaceUp)))
+                return Reject("Lightning Vortex needs another card to discard and a face-up opposing monster.");
+            if (card.Definition.Effect == CardEffect.DrawThreeDiscardTwo &&
+                (CurrentPlayer.Hand.Count < 3 || CurrentPlayer.Deck.Count < 3))
+                return Reject("Graceful Charity needs two cards to discard and three cards in your Deck.");
+            if (card.Definition.Effect == CardEffect.DestroyAllMonsters &&
+                !CurrentPlayer.MonsterZones.Concat(GetOpponent(CurrentPlayer).MonsterZones)
+                    .Any(monster => monster != null))
+                return Reject("There are no monsters on the field to destroy.");
+            if (card.Definition.Effect == CardEffect.DestroyAllOpponentMonsters &&
+                !GetOpponent(CurrentPlayer).MonsterZones.Any(monster => monster != null))
+                return Reject("The opponent has no monster to destroy.");
+            if (card.Definition.Effect == CardEffect.DestroyHighestDefenseMonster &&
+                !GetOpponent(CurrentPlayer).MonsterZones.Any(monster => monster != null && monster.FaceUp))
+                return Reject("The opponent has no face-up monster to destroy.");
+            if (card.Definition.Effect == CardEffect.ReviveMonsterFromGraveyard &&
+                (target == null ||
+                 !(CurrentPlayer.Graveyard.Contains(target) || GetOpponent(CurrentPlayer).Graveyard.Contains(target)) ||
+                 FindEmptyMonsterZone(CurrentPlayer) < 0))
+                return Reject("Select a monster in either Graveyard and make sure you have an open Monster Zone.");
+            if (card.Definition.Effect == CardEffect.BookOfMoon &&
+                (target == null || !IsOnMonsterField(target) || !target.FaceUp))
+                return Reject("Select a face-up monster on the field.");
+            if (card.Definition.Effect == CardEffect.BlackwingHalveMonster &&
+                (target == null || !GetOpponent(CurrentPlayer).MonsterZones.Contains(target) || !target.FaceUp))
+                return Reject("Select a face-up opposing monster.");
+            if (card.Definition.Effect == CardEffect.BlackwingSiroccoBoost &&
+                (Phase != DuelPhase.MainOne || target == null || !CurrentPlayer.MonsterZones.Contains(target) ||
+                 !IsBlackwing(target.Definition)))
+                return Reject("During Main Phase 1, select a Blackwing monster you control.");
+            if (card.Definition.Effect == CardEffect.DestroySetOpponentBackrow &&
+                !GetOpponent(CurrentPlayer).SpellTrapZones.Any(item => item != null && !item.FaceUp))
+                return Reject("The opponent has no Set Spell or Trap to destroy.");
+            if (card.Definition.Effect == CardEffect.MachineDuplication &&
+                (target == null || !CurrentPlayer.MonsterZones.Contains(target) || !target.FaceUp ||
+                 target.Definition.MonsterType != "Machine" || target.CurrentAttack > 500 ||
+                 !CurrentPlayer.Deck.Any(item => item.Definition.CardId == target.Definition.CardId)))
+                return Reject("Select a face-up Machine with 500 or less ATK and a matching copy in your Deck.");
+            if (card.Definition.Effect == CardEffect.CallOfTheHaunted &&
+                (target == null ||
+                 !(CurrentPlayer.Graveyard.Contains(target) || GetOpponent(CurrentPlayer).Graveyard.Contains(target)) ||
+                 !target.Definition.IsMonster || FindEmptyMonsterZone(CurrentPlayer) < 0))
+                return Reject("Select a monster in either Graveyard and make sure you have an open Monster Zone.");
+            if (card.Definition.Effect == CardEffect.IcarusAttack &&
+                (!CurrentPlayer.MonsterZones.Any(IsWingedBeast) || CountFieldCards() < 3))
+                return Reject("Icarus Attack needs a Winged Beast to Tribute and two other cards on the field.");
+            if (card.Definition.Effect == CardEffect.PotOfAvarice &&
+                (CurrentPlayer.Graveyard.Count(item => item.Definition.IsMonster) < 5 ||
+                 CurrentPlayer.Deck.Count < 2))
+                return Reject("Pot of Avarice needs five monsters in your Graveyard and two cards in your Deck.");
+            if (card.Definition.Effect == CardEffect.OneForOne &&
+                (!CurrentPlayer.Hand.Any(item => item != card && item.Definition.IsMonster) ||
+                 !CurrentPlayer.Deck.Any(item => item.Definition.IsMonster && item.Definition.Level == 1) ||
+                 FindEmptyMonsterZone(CurrentPlayer) < 0))
+                return Reject("One for One needs a monster to send from your hand, a Level 1 monster in your Deck, and an open Monster Zone.");
+            if (card.Definition.Effect == CardEffect.Scapegoat &&
+                (CurrentPlayer.SummonsLockedThisTurn ||
+                 CurrentPlayer.MonsterZones.Count(item => item == null) == 0 ||
+                 !StarterCatalog.All.Any(item => item.Kind == CardKind.Token)))
+                return Reject("Scapegoat needs an open Monster Zone and an available Token definition.");
+            if (card.Definition.Effect == CardEffect.LimiterRemoval &&
+                !CurrentPlayer.MonsterZones.Any(item => item != null && item.Definition.MonsterType == "Machine"))
+                return Reject("You need a Machine monster on your field.");
+            if (card.Definition.Effect == CardEffect.Tuning &&
+                !CurrentPlayer.Deck.Any(item => IsSynchronTuner(item.Definition)))
+                return Reject("There is no Synchron Tuner left in your Deck.");
+            if (card.Definition.Effect == CardEffect.BlackWhirlwindSearch &&
+                (card.Definition.Subtype != CardSubtype.Continuous || !CurrentPlayer.MonsterZones
+                    .Any(item => item != null && IsBlackwing(item.Definition))))
+                return Reject("Black Whirlwind needs a Blackwing monster on your field.");
             if (card.Definition.Effect == CardEffect.DestroySpellTrap &&
                 (target == null || !IsOnSpellTrapField(target)))
                 return Reject("Select a Spell or Trap on the field to destroy.");
@@ -767,6 +1055,11 @@ namespace DuelPrototype
                     !owner.MonsterZones.Any(monster => monster != null);
                 if (!fieldBoostWaitingForMonster && !ApplyEffect(owner, card.Definition, target, card))
                     return false;
+                if (fromSetTrap && card.Definition.Effect == CardEffect.CallOfTheHaunted)
+                {
+                    card.FaceUp = true;
+                }
+                else
                 if (handSpell && (card.Definition.Subtype == CardSubtype.Continuous ||
                                   card.Definition.Subtype == CardSubtype.Field))
                     PlaceActiveSpell(owner, card);
@@ -834,6 +1127,7 @@ namespace DuelPrototype
             CardInstance summoned = new CardInstance(synchro) { SummonedTurnNumber = turnNumber };
             CurrentPlayer.MonsterZones[zone] = summoned;
             Log(CurrentPlayer.Name + " Synchro Summoned " + synchro.DisplayName + "!");
+            ResolveSummonTriggers(CurrentPlayer, summoned, false);
             return true;
         }
 
@@ -841,31 +1135,19 @@ namespace DuelPrototype
         {
             if (SearchChoiceOpen || (!IsAiVsAi && CurrentPlayer != Human) || Phase != DuelPhase.Battle)
                 return Reject("Attacks are only available during your Battle Phase.");
-            bool attackStarted = ResolveAttack(CurrentPlayer, attacker, target);
-            if (attackStarted)
-                AttackDeclared?.Invoke(attacker, target);
-            return attackStarted;
+            return ResolveAttack(CurrentPlayer, attacker, target);
         }
 
         public bool TryChooseSearchCard(CardInstance card)
         {
             if (!SearchChoiceOpen || card == null ||
-                !pendingSanganOwner.Deck.Contains(card) || !card.Definition.IsMonster ||
-                !card.Definition.CanBeMainDeck ||
-                card.Definition.Attack > 1500)
-                return Reject("Choose a monster with 1500 or less ATK from the Deck.");
+                !pendingDeckChoiceOwner.Deck.Contains(card) ||
+                !pendingDeckChoiceFilter(card))
+                return Reject("Choose a card that matches the effect's Deck search requirements.");
 
-            DuelPlayer owner = pendingSanganOwner;
-            owner.Deck.Remove(card);
-            owner.Hand.Add(card);
-            temporarilyDisabledCardName = card.Definition.DisplayName;
-            temporarilyDisabledCardOwner = owner;
-            temporarilyDisabledCardTurn = turnNumber;
-            Log(owner.Name + " added " + card.Definition.DisplayName +
-                " to hand with Sangan. That card's effects cannot be activated this turn.");
-            pendingSanganOwner = null;
-            pendingSanganSource = null;
-            ProcessPendingAiActions();
+            DuelPlayer owner = pendingDeckChoiceOwner;
+            CompleteDeckChoice(owner, card, pendingDeckChoiceToGraveyard, pendingDeckChoiceSanganRestriction);
+            ClearDeckChoice();
             return true;
         }
 
@@ -929,6 +1211,14 @@ namespace DuelPrototype
             card.HasChangedPositionThisTurn = true;
             CurrentPlayer.PositionChangedThisTurn = true;
             Log(CurrentPlayer.Name + " Flip Summoned " + card.Definition.DisplayName + " in Attack Position.");
+            if (card.Definition.Effect == CardEffect.DekoichiDraw)
+            {
+                DrawCard(CurrentPlayer);
+                int extraDraws = CurrentPlayer.MonsterZones.Count(item =>
+                    item != null && item.FaceUp && item.Definition.DisplayName == "Bokoichi the Freightening Car");
+                for (int i = 0; i < extraDraws && Phase != DuelPhase.GameOver; i++)
+                    DrawCard(CurrentPlayer);
+            }
             return true;
         }
 
@@ -937,6 +1227,18 @@ namespace DuelPrototype
             if (!IsHumanActionWindow || ResponseWindowOpen || SearchChoiceOpen)
                 return;
             AdvanceToNextPhase();
+        }
+
+        public bool EndHumanTurn()
+        {
+            if (!IsHumanActionWindow || ResponseWindowOpen || SearchChoiceOpen)
+                return false;
+
+            if (Phase != DuelPhase.End && !AdvanceToPhase(DuelPhase.End))
+                return false;
+
+            AdvancePhase();
+            return CurrentPlayer != Human || Phase == DuelPhase.GameOver;
         }
 
         public bool AdvanceToPhase(DuelPhase target)
@@ -1009,11 +1311,12 @@ namespace DuelPrototype
 
         public bool StepAiTurn()
         {
-            if (!IsAiVsAi || Phase == DuelPhase.GameOver)
+            if (Phase == DuelPhase.GameOver || (!IsAiVsAi && pendingAiTurnActor == null))
                 return false;
 
-            DuelPlayer activePlayer = CurrentPlayer;
-            RunAiTurnActions(activePlayer);
+            if (!HasPendingAiActions)
+                RunAiTurnActions(CurrentPlayer);
+            ProcessPendingAiActions();
             return true;
         }
 
@@ -1036,7 +1339,6 @@ namespace DuelPrototype
                 ClearResponseWindow();
                 if (negateActivation != null)
                     negateActivation();
-                ProcessPendingAiActions();
                 return true;
             }
 
@@ -1080,8 +1382,6 @@ namespace DuelPrototype
                 Log("Chain Link " + chainLinkCount + " resolved.");
             }
 
-            if (!ResponseWindowOpen)
-                ProcessPendingAiActions();
             return true;
         }
 
@@ -1095,7 +1395,6 @@ namespace DuelPrototype
             ClearResponseWindow();
             Log("Response window passed.");
             resolvePending();
-            ProcessPendingAiActions();
             return true;
         }
 
@@ -1254,6 +1553,12 @@ namespace DuelPrototype
                 endingPlayer.NoAttackTurnsRemaining--;
             if (endingPlayer.PositionChangesLockedTurnsRemaining > 0)
                 endingPlayer.PositionChangesLockedTurnsRemaining--;
+            foreach (CardInstance monster in endingPlayer.MonsterZones
+                         .Where(item => item != null && item.DestroyAtEndPhaseTurn == turnNumber).ToList())
+            {
+                SendMonsterToGraveyard(endingPlayer, monster);
+                Log(monster.Definition.DisplayName + " was destroyed by Limiter Removal.");
+            }
 
             foreach (DuelPlayer owner in new[] { Human, Opponent })
             {
@@ -1286,24 +1591,44 @@ namespace DuelPrototype
             RunAiTurnActions(Opponent);
         }
 
+        // Candidate callbacks keep AI choice separate from rule validation. A candidate may
+        // execute any validated DuelEngine action, including TryActivate for supported effects.
+        private sealed class AiActionCandidate
+        {
+            public double Score { get; }
+            public Action Execute { get; }
+
+            public AiActionCandidate(double score, Action execute)
+            {
+                Score = score;
+                Execute = execute;
+            }
+        }
+
         private void RunAiTurnActions(DuelPlayer actor)
         {
             if (Phase == DuelPhase.GameOver || ResponseWindowOpen)
                 return;
 
-            if (Phase == DuelPhase.Draw)
-            {
-                SetPhase(DuelPhase.Standby);
-                Log(actor.Name + " entered the Standby Phase.");
-            }
-            if (Phase == DuelPhase.Standby)
-            {
-                SetPhase(DuelPhase.MainOne);
-                Log(actor.Name + " entered Main Phase 1.");
-            }
             pendingAiTurnActor = actor;
             pendingAiActions.Clear();
             pendingAiActionIndex = 0;
+            if (Phase == DuelPhase.Draw)
+            {
+                pendingAiActions.Add(() =>
+                {
+                    SetPhase(DuelPhase.Standby);
+                    Log(actor.Name + " entered the Standby Phase.");
+                });
+            }
+            if (Phase == DuelPhase.Draw || Phase == DuelPhase.Standby)
+            {
+                pendingAiActions.Add(() =>
+                {
+                    SetPhase(DuelPhase.MainOne);
+                    Log(actor.Name + " entered Main Phase 1.");
+                });
+            }
             pendingAiActions.Add(() => TryAiNormalSummon(actor));
             pendingAiActions.Add(() => TryAiBossSummon(actor));
             pendingAiActions.Add(() => TryAiFusion(actor));
@@ -1311,31 +1636,40 @@ namespace DuelPrototype
             pendingAiActions.Add(() => EnqueueMonsterEffectActions(actor));
             pendingAiActions.Add(() => TryAiSynchro(actor));
             pendingAiActions.Add(() => EnqueueTrapSetActions(actor));
+            pendingAiActions.Add(() => EnqueuePositionActions(actor));
             pendingAiActions.Add(() => EnqueueBattleActions(actor));
+            pendingAiActions.Add(EnterAiEndPhase);
             pendingAiActions.Add(FinishAiTurn);
-            ProcessPendingAiActions();
         }
 
         private void TryAiNormalSummon(DuelPlayer actor)
         {
             if (actor.NormalSummonsThisTurn != 0)
                 return;
+
             DuelPlayer opponent = GetOpponent(actor);
             List<CardInstance> field = actor.MonsterZones.Where(card => card != null).ToList();
-            CardInstance summon = actor.Hand
-                .Where(card => card.Definition.CanNormalSummon)
-                .Where(card => card.Definition.Level < 5 ||
-                               field.Count >= (card.Definition.Level >= 7 ? 2 : 1))
-                .OrderByDescending(card => AiSummonScore(actor, card, field, opponent))
-                .FirstOrDefault();
-            if (summon == null)
-                return;
+            List<AiActionCandidate> candidates = new List<AiActionCandidate>();
+            foreach (CardInstance summon in actor.Hand
+                         .Where(card => card.Definition.CanNormalSummon)
+                         .Where(card => card.Definition.Level < 5 ||
+                                        field.Count >= (card.Definition.Level >= 7 ? 2 : 1)))
+            {
+                int tributeCount = summon.Definition.Level >= 7 ? 2 : summon.Definition.Level >= 5 ? 1 : 0;
+                List<CardInstance> tributes = field
+                    .OrderBy(card => AiFieldMonsterValue(card, opponent))
+                    .Take(tributeCount).ToList();
+                foreach (bool setFaceDown in new[] { false, true })
+                {
+                    double score = AiSummonScore(actor, summon, field, opponent, setFaceDown);
+                    candidates.Add(new AiActionCandidate(score,
+                        () => TryNormalSummon(summon, tributes, setFaceDown)));
+                }
+            }
 
-            int tributeCount = summon.Definition.Level >= 7 ? 2 : summon.Definition.Level >= 5 ? 1 : 0;
-            List<CardInstance> tributes = field
-                .OrderBy(card => AiFieldMonsterValue(card, opponent))
-                .Take(tributeCount).ToList();
-            TryNormalSummon(summon, tributes);
+            AiActionCandidate best = candidates.OrderByDescending(candidate => candidate.Score).FirstOrDefault();
+            if (best != null)
+                best.Execute();
         }
 
         private void TryAiBossSummon(DuelPlayer actor)
@@ -1420,7 +1754,8 @@ namespace DuelPrototype
             DuelPlayer actor,
             CardInstance card,
             IReadOnlyList<CardInstance> field,
-            DuelPlayer opponent)
+            DuelPlayer opponent,
+            bool setFaceDown)
         {
             double score = card.Definition.Attack + card.Definition.Defense * 0.2;
             if (card.Definition.IsTuner)
@@ -1433,11 +1768,33 @@ namespace DuelPrototype
             if (CanEnableSynchro(actor, card, field))
                 score += 700;
 
-            if (opponent.MonsterZones.Any(monster => monster != null))
-                score += card.Definition.Attack > opponent.MonsterZones.Where(monster => monster != null)
-                    .Max(monster => monster.AttackPosition ? monster.CurrentAttack : monster.Definition.Defense)
-                    ? 120 : 0;
+            score += AiBattlePositionScore(card.Definition.Attack, card.Definition.Defense,
+                !setFaceDown, opponent);
+            // Setting hides effects as well as stats; prefer a face-up summon when it has an effect.
+            if (setFaceDown && card.Definition.IsEffectMonster)
+                score -= 220;
             return score;
+        }
+
+        private static double AiBattlePositionScore(
+            int attack,
+            int defense,
+            bool attackPosition,
+            DuelPlayer opponent)
+        {
+            List<CardInstance> visibleThreats = opponent.MonsterZones
+                .Where(monster => monster != null && monster.FaceUp).ToList();
+            if (visibleThreats.Count == 0)
+                return attackPosition ? 300 + attack * 0.1 : defense * 0.1;
+
+            int strongestThreat = visibleThreats.Max(monster => monster.CurrentAttack);
+            int power = attackPosition ? attack : defense;
+            bool canSurviveOrWin = power >= strongestThreat;
+            double positionScore = (attackPosition ? attack : defense) * 0.1;
+            positionScore += canSurviveOrWin
+                ? (attackPosition ? 300 : 240)
+                : -250 - (strongestThreat - power) * 0.35;
+            return positionScore;
         }
 
         private static bool CanEnableSynchro(
@@ -1447,9 +1804,11 @@ namespace DuelPrototype
         {
             foreach (CardInstance extra in actor.ExtraDeck.Where(card => card.Definition.Kind == CardKind.Synchro))
             {
+                if (!CanUseSynchroMaterial(extra.Definition, candidate))
+                    continue;
                 for (int mask = 0; mask < (1 << field.Count); mask++)
                 {
-                    int level = candidate.Definition.Level;
+                    int level = GetSynchroMaterialLevel(extra.Definition, candidate);
                     int tunerCount = candidate.Definition.IsTuner ? 1 : 0;
                     bool hasNonTuner = !candidate.Definition.IsTuner;
                     for (int bit = 0; bit < field.Count; bit++)
@@ -1457,7 +1816,12 @@ namespace DuelPrototype
                         if ((mask & (1 << bit)) == 0)
                             continue;
                         CardInstance material = field[bit];
-                        level += material.Definition.Level;
+                        if (!CanUseSynchroMaterial(extra.Definition, material))
+                        {
+                            level = -1;
+                            break;
+                        }
+                        level += GetSynchroMaterialLevel(extra.Definition, material);
                         if (material.Definition.IsTuner)
                             tunerCount++;
                         else
@@ -1487,10 +1851,13 @@ namespace DuelPrototype
 
         private void EnqueueSpellActions(DuelPlayer actor)
         {
-            InsertPendingActions(actor.Hand.Where(card => card.Definition.Kind == CardKind.Spell &&
-                    AiEffectPriority(card.Definition, actor) > 0)
-                .OrderByDescending(card => AiEffectPriority(card.Definition, actor))
-                .Select(card => (Action)(() => TryActivateAiSpell(card, actor))).ToList());
+            List<AiActionCandidate> candidates = actor.Hand
+                .Where(card => card.Definition.Kind == CardKind.Spell &&
+                               AiEffectPriority(card.Definition, actor) > 0)
+                .Select(card => new AiActionCandidate(AiEffectPriority(card.Definition, actor),
+                    () => TryActivateAiSpell(card, actor)))
+                .OrderByDescending(candidate => candidate.Score).ToList();
+            InsertPendingActions(candidates.Select(candidate => candidate.Execute).ToList());
         }
 
         private void TryActivateAiSpell(CardInstance card, DuelPlayer actor)
@@ -1519,14 +1886,15 @@ namespace DuelPrototype
 
         private void EnqueueMonsterEffectActions(DuelPlayer actor)
         {
-            InsertPendingActions(actor.MonsterZones.Where(card => card != null && card.FaceUp &&
-                    AiEffectPriority(card.Definition, actor) > 0)
-                .OrderByDescending(card => AiEffectPriority(card.Definition, actor))
-                .Select(card => (Action)(() =>
+            List<AiActionCandidate> candidates = actor.MonsterZones
+                .Where(card => card != null && card.FaceUp && AiEffectPriority(card.Definition, actor) > 0)
+                .Select(card => new AiActionCandidate(AiEffectPriority(card.Definition, actor), () =>
                 {
                     if (actor.MonsterZones.Contains(card) && !card.EffectUsedThisTurn)
                         TryActivate(card);
-                })).ToList());
+                }))
+                .OrderByDescending(candidate => candidate.Score).ToList();
+            InsertPendingActions(candidates.Select(candidate => candidate.Execute).ToList());
         }
 
         private int AiEffectPriority(CardDefinition definition, DuelPlayer owner)
@@ -1563,6 +1931,27 @@ namespace DuelPrototype
                     return owner.MonsterZones.Any(card => card != null) ? 400 + definition.EffectValue : 0;
                 default: return 0;
             }
+        }
+
+        private void EnqueuePositionActions(DuelPlayer actor)
+        {
+            if (CurrentPlayer != actor || !CanActInMainPhase() ||
+                turnNumber <= actor.CannotChangePositionUntilTurn ||
+                actor.PositionChangesLockedTurnsRemaining > 0)
+                return;
+
+            List<AiActionCandidate> candidates = actor.MonsterZones
+                .Where(card => card != null && card.FaceUp && !card.HasAttacked &&
+                               !card.HasChangedPositionThisTurn && turnNumber > card.SummonedTurnNumber)
+                .Select(card => new AiActionCandidate(
+                    AiBattlePositionScore(card.CurrentAttack, card.Definition.Defense,
+                        !card.AttackPosition, GetOpponent(actor)) -
+                    AiBattlePositionScore(card.CurrentAttack, card.Definition.Defense,
+                        card.AttackPosition, GetOpponent(actor)),
+                    () => TryChangePosition(card)))
+                .Where(candidate => candidate.Score >= 100)
+                .OrderByDescending(candidate => candidate.Score).ToList();
+            InsertPendingActions(candidates.Select(candidate => candidate.Execute).ToList());
         }
 
         private void EnqueueBattleActions(DuelPlayer actor)
@@ -1631,12 +2020,20 @@ namespace DuelPrototype
 
         private void ProcessPendingAiActions()
         {
-            while (!ResponseWindowOpen && !SearchChoiceOpen && Phase != DuelPhase.GameOver &&
-                   pendingAiActionIndex < pendingAiActions.Count)
-            {
-                Action action = pendingAiActions[pendingAiActionIndex++];
-                action();
-            }
+            if (ResponseWindowOpen || SearchChoiceOpen || Phase == DuelPhase.GameOver ||
+                pendingAiActionIndex >= pendingAiActions.Count)
+                return;
+
+            Action action = pendingAiActions[pendingAiActionIndex++];
+            action();
+        }
+
+        private void EnterAiEndPhase()
+        {
+            if (Phase == DuelPhase.GameOver || pendingAiTurnActor == null)
+                return;
+            SetPhase(DuelPhase.End);
+            Log(pendingAiTurnActor.Name + " entered the End Phase.");
         }
 
         private void FinishAiTurn()
@@ -1716,8 +2113,10 @@ namespace DuelPrototype
             List<CardInstance> defenders = defender.MonsterZones.Where(card => card != null).ToList();
             if (target == null)
             {
-                if (defenders.Count > 0)
+                if (!CanAttackDirectly(attackerOwner, attacker, defenders))
                     return Reject("You must attack a monster while the opponent controls one.");
+                Log(attackerOwner.Name + "'s " + attacker.Definition.DisplayName + " declared a direct attack.");
+                AttackDeclared?.Invoke(attacker, null);
                 attacker.HasAttacked = true;
                 ResponseAttempt response = OpenResponseWindow(defender, CardEffect.StopAttack, attacker,
                     () => ResolveAttackCore(attackerOwner, attacker, null), () => { });
@@ -1730,6 +2129,7 @@ namespace DuelPrototype
 
             Log(attackerOwner.Name + "'s " + attacker.Definition.DisplayName + " declared an attack on " +
                 target.Definition.DisplayName + ".");
+            AttackDeclared?.Invoke(attacker, target);
             attacker.HasAttacked = true;
             ResponseAttempt attackResponse = OpenResponseWindow(defender, CardEffect.StopAttack, attacker,
                 () => ResolveAttackCore(attackerOwner, attacker, target), () => { });
@@ -1744,7 +2144,7 @@ namespace DuelPrototype
             List<CardInstance> defenders = defender.MonsterZones.Where(card => card != null).ToList();
             if (target == null)
             {
-                if (defenders.Count > 0)
+                if (!CanAttackDirectly(attackerOwner, attacker, defenders))
                     return Reject("You must attack a monster while the opponent controls one.");
                 defender.LifePoints -= attacker.CurrentAttack;
                 Log(attacker.Definition.DisplayName + " attacked directly for " + attacker.CurrentAttack + " damage.");
@@ -1827,6 +2227,180 @@ namespace DuelPrototype
                     for (int i = 0; i < 2 && Phase != DuelPhase.GameOver; i++)
                         DrawCard(owner);
                     return true;
+                case CardEffect.SearchDeckToHand:
+                    return BeginDeckChoice(owner, source,
+                        candidate => MatchesDeckEffectFilter(definition, candidate),
+                        false, definition.DisplayName + ": choose a matching card from your Deck.");
+                case CardEffect.Tuning:
+                    return BeginDeckChoice(owner, source,
+                        candidate => IsSynchronTuner(candidate.Definition),
+                        false, "Choose a Synchron Tuner from your Deck. Then send the top card of your Deck to the Graveyard.");
+                case CardEffect.SendMonsterFromDeckToGraveyard:
+                    return BeginDeckChoice(owner, source,
+                        candidate => MatchesDeckEffectFilter(definition, candidate),
+                        true, definition.DisplayName + ": choose a monster to send from your Deck to the Graveyard.");
+                case CardEffect.BlackwingHalveMonster:
+                    if (target == null || !opponent.MonsterZones.Contains(target) || !target.FaceUp)
+                        return Reject("Select a face-up opposing monster.");
+                    target.AttackBonus -= target.CurrentAttack / 2;
+                    return true;
+                case CardEffect.BlackwingSiroccoBoost:
+                    if (target == null || !owner.MonsterZones.Contains(target) ||
+                        !IsBlackwing(target.Definition))
+                        return Reject("Select a Blackwing monster you control.");
+                    target.AttackBonus += owner.MonsterZones
+                        .Where(item => item != null && item != target && item.FaceUp &&
+                            IsBlackwing(item.Definition))
+                        .Sum(item => item.CurrentAttack);
+                    foreach (CardInstance otherMonster in owner.MonsterZones.Where(item =>
+                                 item != null && item != target))
+                        otherMonster.HasAttacked = true;
+                    return true;
+                case CardEffect.BookOfMoon:
+                    if (target == null || !IsOnMonsterField(target) || !target.FaceUp)
+                        return Reject("Select a face-up monster on the field.");
+                    target.FaceUp = false;
+                    target.AttackPosition = false;
+                    Log(target.Definition.DisplayName + " was changed to face-down Defense Position.");
+                    return true;
+                case CardEffect.DestroySetOpponentBackrow:
+                    foreach (CardInstance setCard in opponent.SpellTrapZones
+                                 .Where(item => item != null && !item.FaceUp).ToList())
+                    {
+                        RemoveFromSpellTrapZones(opponent, setCard);
+                        opponent.Graveyard.Add(setCard);
+                    }
+                    return true;
+                case CardEffect.IcarusAttack:
+                    CardInstance tribute = owner.MonsterZones.FirstOrDefault(IsWingedBeast);
+                    List<CardInstance> fieldTargets = GetAllFieldCards()
+                        .Where(item => item != tribute)
+                        .OrderBy(item => GetCardController(item) == owner ? 1 : 0)
+                        .Take(2)
+                        .ToList();
+                    if (tribute == null || fieldTargets.Count < 2)
+                        return Reject("Icarus Attack needs a Winged Beast to Tribute and two other cards on the field.");
+                    SendMonsterToGraveyard(owner, tribute);
+                    foreach (CardInstance fieldTarget in fieldTargets)
+                        DestroyFieldCard(fieldTarget);
+                    return true;
+                case CardEffect.LimiterRemoval:
+                    foreach (CardInstance machine in owner.MonsterZones.Where(item =>
+                                 item != null && item.Definition.MonsterType == "Machine"))
+                    {
+                        machine.AttackBonus += machine.CurrentAttack;
+                        machine.DestroyAtEndPhaseTurn = turnNumber;
+                    }
+                    return true;
+                case CardEffect.MachineDuplication:
+                    if (target == null || !owner.MonsterZones.Contains(target) ||
+                        target.Definition.MonsterType != "Machine" || target.CurrentAttack > 500)
+                        return Reject("Select your face-up Machine with 500 or less ATK.");
+                    for (int count = 0; count < 2; count++)
+                    {
+                        int duplicationZone = FindEmptyMonsterZone(owner);
+                        CardInstance copy = owner.Deck.FirstOrDefault(item =>
+                            item.Definition.CardId == target.Definition.CardId);
+                        if (duplicationZone < 0 || copy == null)
+                            break;
+                        owner.Deck.Remove(copy);
+                        PlaceSpecialSummon(owner, copy, duplicationZone, true);
+                    }
+                    return true;
+                case CardEffect.OneForOne:
+                    CardInstance discard = owner.Hand.FirstOrDefault(item =>
+                        item != source && item.Definition.IsMonster);
+                    CardInstance levelOne = owner.Deck.FirstOrDefault(item =>
+                        item.Definition.IsMonster && item.Definition.Level == 1);
+                    int oneForOneZone = FindEmptyMonsterZone(owner);
+                    if (discard == null || levelOne == null || oneForOneZone < 0)
+                        return Reject("One for One no longer has a legal cost, target, or open Monster Zone.");
+                    owner.Hand.Remove(discard);
+                    owner.Graveyard.Add(discard);
+                    owner.Deck.Remove(levelOne);
+                    PlaceSpecialSummon(owner, levelOne, oneForOneZone, true);
+                    return true;
+                case CardEffect.PotOfAvarice:
+                    List<CardInstance> returnedMonsters = owner.Graveyard
+                        .Where(item => item.Definition.IsMonster).Take(5).ToList();
+                    if (returnedMonsters.Count < 5)
+                        return Reject("Pot of Avarice no longer has five monsters to return.");
+                    foreach (CardInstance monster in returnedMonsters)
+                    {
+                        owner.Graveyard.Remove(monster);
+                        owner.Deck.Add(monster);
+                    }
+                    Shuffle(owner.Deck);
+                    DrawCard(owner);
+                    DrawCard(owner);
+                    return true;
+                case CardEffect.Scapegoat:
+                    CardDefinition tokenDefinition = StarterCatalog.All.FirstOrDefault(item => item.Kind == CardKind.Token);
+                    if (tokenDefinition == null)
+                        return Reject("No Token card definition is available for Scapegoat.");
+                    owner.SummonsLockedThisTurn = true;
+                    for (int i = 0; i < 4; i++)
+                    {
+                        int tokenZone = FindEmptyMonsterZone(owner);
+                        if (tokenZone < 0)
+                            break;
+                        PlaceSpecialSummon(owner, new CardInstance(tokenDefinition), tokenZone, false);
+                    }
+                    return true;
+                case CardEffect.CallOfTheHaunted:
+                    return ActivateCallOfTheHaunted(owner, source, target);
+                case CardEffect.BlackWhirlwindSearch:
+                    return true;
+                case CardEffect.DiscardDrawSameCount:
+                    int ownerDiscardCount = owner.Hand.Count - (source != null && owner.Hand.Contains(source) ? 1 : 0);
+                    int opponentDiscardCount = opponent.Hand.Count;
+                    DiscardCards(owner, source, ownerDiscardCount, definition.DisplayName);
+                    DiscardCards(opponent, null, opponentDiscardCount, definition.DisplayName);
+                    for (int i = 0; i < ownerDiscardCount && Phase != DuelPhase.GameOver; i++)
+                        DrawCard(owner);
+                    for (int i = 0; i < opponentDiscardCount && Phase != DuelPhase.GameOver; i++)
+                        DrawCard(opponent);
+                    return true;
+                case CardEffect.DrawThreeDiscardTwo:
+                    for (int i = 0; i < 3 && owner.Deck.Count > 0 && Phase != DuelPhase.GameOver; i++)
+                        DrawCard(owner);
+                    DiscardCards(owner, source, 2, definition.DisplayName);
+                    return true;
+                case CardEffect.DiscardOneDestroyFaceUpOpponentMonsters:
+                    if (!DiscardCards(owner, source, 1, definition.DisplayName))
+                        return Reject("You need a card in your hand to discard.");
+                    foreach (CardInstance monster in opponent.MonsterZones
+                                 .Where(item => item != null && item.FaceUp).ToList())
+                        SendMonsterToGraveyard(opponent, monster);
+                    CheckWinner();
+                    return true;
+                case CardEffect.DestroyAllMonsters:
+                    foreach (CardInstance monster in owner.MonsterZones.Concat(opponent.MonsterZones)
+                                 .Where(item => item != null).ToList())
+                        SendMonsterToGraveyard(GetMonsterOwner(monster), monster);
+                    CheckWinner();
+                    return true;
+                case CardEffect.DestroyAllOpponentMonsters:
+                    foreach (CardInstance monster in opponent.MonsterZones.Where(item => item != null).ToList())
+                        SendMonsterToGraveyard(opponent, monster);
+                    CheckWinner();
+                    return true;
+                case CardEffect.DestroyHighestDefenseMonster:
+                    CardInstance highestDefense = opponent.MonsterZones
+                        .Where(item => item != null && item.FaceUp)
+                        .OrderByDescending(item => item.Definition.Defense)
+                        .FirstOrDefault();
+                    if (highestDefense == null)
+                        return Reject("The opponent has no face-up monster to destroy.");
+                    SendMonsterToGraveyard(opponent, highestDefense);
+                    CheckWinner();
+                    return true;
+                case CardEffect.ReturnAllSpellTrapsToHand:
+                    ReturnAllSpellTrapsToHand(owner);
+                    ReturnAllSpellTrapsToHand(opponent);
+                    return true;
+                case CardEffect.ReviveMonsterFromGraveyard:
+                    return ReviveFromGraveyard(owner, target);
                 case CardEffect.BurnOpponent:
                     opponent.LifePoints -= definition.EffectValue;
                     CheckWinner();
@@ -1856,8 +2430,8 @@ namespace DuelPrototype
                             (definition.CardId != "sdmy-en024" || IsLowLevelMagnetWarrior(card)))
                         .OrderBy(card => card.CurrentAttack)
                         .FirstOrDefault();
-                    int zone = FindEmptyMonsterZone(owner);
-                    if (revived == null || zone < 0)
+                    int reviveZone = FindEmptyMonsterZone(owner);
+                    if (revived == null || reviveZone < 0)
                         return Reject("You need an open Monster Zone and a monster in your Graveyard.");
                     owner.Graveyard.Remove(revived);
                     revived.FaceUp = true;
@@ -1866,7 +2440,7 @@ namespace DuelPrototype
                     revived.EffectUsedThisTurn = false;
                     revived.AttackBonus = 0;
                     revived.SummonedTurnNumber = turnNumber;
-                    owner.MonsterZones[zone] = revived;
+                    owner.MonsterZones[reviveZone] = revived;
                     Log(owner.Name + " returned " + revived.Definition.DisplayName + " from the Graveyard in Defense Position.");
                     return true;
                 case CardEffect.DarkMagicAttack:
@@ -2171,10 +2745,14 @@ namespace DuelPrototype
             return player.SpellTrapZones.Where(card => card != null && !card.FaceUp &&
                 card.Definition.Kind == CardKind.Trap &&
                 (eventType == CardEffect.StopAttack
-                    ? card.Definition.Effect == eventType ||
-                      card.Definition.DisplayName == "Mirror Force" ||
+                    ? card.Definition.Effect == CardEffect.StopAttack ||
+                      card.Definition.Effect == CardEffect.SakuretsuArmor ||
+                      card.Definition.Effect == CardEffect.ScrapIronScarecrow ||
                       card.Definition.DisplayName == "Magic Cylinder"
-                    : card.Definition.Effect == eventType && card.Definition.Subtype == CardSubtype.Counter)).ToList();
+                    : eventType == CardEffect.DestroyAllMonsters
+                        ? card.Definition.Effect == CardEffect.TorrentialTribute
+                        : card.Definition.Effect == eventType &&
+                          card.Definition.Subtype == CardSubtype.Counter)).ToList();
         }
 
         private void ActivateResponseTrap(DuelPlayer player, CardInstance trap)
@@ -2194,6 +2772,18 @@ namespace DuelPrototype
             ActivateResponseTrap(defender, trap);
             Log("Chain Link: " + trap.Definition.DisplayName + " negated the Trap effect.");
             return true;
+        }
+
+        private static bool CanAttackDirectly(
+            DuelPlayer attackerOwner, CardInstance attacker, IReadOnlyCollection<CardInstance> defenders)
+        {
+            if (defenders.Count == 0)
+                return true;
+            bool boardenEffect = attackerOwner.MonsterZones.Any(card =>
+                card != null && card.FaceUp && !card.AttackPosition &&
+                card.Definition.Effect == CardEffect.MorphtronicBoarden);
+            return boardenEffect && attacker.Definition.DisplayName.StartsWith("Morphtronic",
+                StringComparison.OrdinalIgnoreCase);
         }
 
         private bool ResolveAttackResponse(DuelPlayer defender, CardInstance response, CardInstance attacker)
@@ -2222,6 +2812,35 @@ namespace DuelPrototype
                 return true;
             }
 
+            if (response.Definition.Effect == CardEffect.TorrentialTribute)
+            {
+                DestroyAllMonstersOnField();
+                CheckWinner();
+                Log("Torrential Tribute destroyed all monsters on the field.");
+                return true;
+            }
+
+            if (response.Definition.Effect == CardEffect.SakuretsuArmor)
+            {
+                SendMonsterToGraveyard(attackerOwner, attacker);
+                Log("Sakuretsu Armor destroyed " + attacker.Definition.DisplayName + ".");
+                CheckWinner();
+                return true;
+            }
+
+            if (response.Definition.Effect == CardEffect.ScrapIronScarecrow)
+            {
+                Log(response.Definition.DisplayName + " negated " + attacker.Definition.DisplayName + "'s attack.");
+                int zone = FindEmptySpellTrapZone(defender);
+                if (zone >= 0)
+                {
+                    defender.Graveyard.Remove(response);
+                    response.FaceUp = false;
+                    defender.SpellTrapZones[zone] = response;
+                }
+                return true;
+            }
+
             if (response.Definition.Effect == CardEffect.StopAttack)
             {
                 Log(response.Definition.DisplayName + " negated " + attacker.Definition.DisplayName + "'s attack.");
@@ -2231,19 +2850,140 @@ namespace DuelPrototype
             return false;
         }
 
+        private void DestroyAllMonstersOnField()
+        {
+            foreach (CardInstance monster in Human.MonsterZones.Concat(Opponent.MonsterZones)
+                         .Where(item => item != null).ToList())
+                SendMonsterToGraveyard(GetMonsterOwner(monster), monster);
+        }
+
         private bool IsValidSynchroMaterial(CardDefinition synchro, IReadOnlyList<CardInstance> materials, DuelPlayer owner)
         {
             if (materials == null || materials.Count < 2 ||
-                materials.Any(card => card == null || !card.FaceUp || !owner.MonsterZones.Contains(card)))
+                materials.Any(card => card == null || !card.FaceUp || !owner.MonsterZones.Contains(card) ||
+                    !CanUseSynchroMaterial(synchro, card)))
                 return false;
-            return materials.Sum(card => card.Definition.Level) == synchro.Level &&
+            return materials.Sum(card => GetSynchroMaterialLevel(synchro, card)) == synchro.Level &&
                    materials.Count(card => card.Definition.IsTuner) == 1 &&
                    materials.Any(card => !card.Definition.IsTuner);
+        }
+
+        private static bool CanUseSynchroMaterial(CardDefinition synchro, CardInstance material)
+        {
+            return material.Definition.Effect != CardEffect.MajesticDragon ||
+                synchro.DisplayName.IndexOf("Majestic", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static int GetSynchroMaterialLevel(CardDefinition synchro, CardInstance material)
+        {
+            int level = material.Definition.Level;
+            if (material.Definition.Effect == CardEffect.RoadSynchron &&
+                !string.Equals(synchro.DisplayName, "Road Warrior", StringComparison.OrdinalIgnoreCase))
+                level -= 2;
+            return level;
         }
 
         private DuelPlayer GetOpponent(DuelPlayer player)
         {
             return player == Human ? Opponent : Human;
+        }
+
+        private bool IsOnMonsterField(CardInstance card)
+        {
+            return card != null && (Human.MonsterZones.Contains(card) || Opponent.MonsterZones.Contains(card));
+        }
+
+        private static bool IsWingedBeast(CardInstance card)
+        {
+            return card != null && string.Equals(card.Definition.MonsterType, "Winged Beast",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsBlackwing(CardDefinition definition)
+        {
+            return definition != null && definition.DisplayName.StartsWith("Blackwing",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsSynchronTuner(CardDefinition definition)
+        {
+            return definition != null && definition.IsTuner &&
+                   definition.DisplayName.IndexOf("Synchron", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private List<CardInstance> GetAllFieldCards()
+        {
+            return Human.MonsterZones.Concat(Opponent.MonsterZones)
+                .Concat(Human.SpellTrapZones).Concat(Opponent.SpellTrapZones)
+                .Concat(new[] { Human.FieldSpellZone, Opponent.FieldSpellZone })
+                .Where(card => card != null).ToList();
+        }
+
+        private DuelPlayer GetCardController(CardInstance card)
+        {
+            DuelPlayer monsterOwner = GetMonsterOwner(card);
+            return monsterOwner ?? GetSpellTrapOwner(card);
+        }
+
+        private int CountFieldCards()
+        {
+            return GetAllFieldCards().Count;
+        }
+
+        private void DestroyFieldCard(CardInstance card)
+        {
+            DuelPlayer monsterOwner = GetMonsterOwner(card);
+            if (monsterOwner != null)
+            {
+                SendMonsterToGraveyard(monsterOwner, card);
+                return;
+            }
+
+            DuelPlayer spellTrapOwner = GetSpellTrapOwner(card);
+            if (spellTrapOwner == null)
+                return;
+            if (spellTrapOwner.FieldSpellZone == card)
+                spellTrapOwner.FieldSpellZone = null;
+            else
+                RemoveFromSpellTrapZones(spellTrapOwner, card);
+            spellTrapOwner.Graveyard.Add(card);
+        }
+
+        private void PlaceSpecialSummon(DuelPlayer owner, CardInstance card, int zone, bool attackPosition)
+        {
+            owner.Hand.Remove(card);
+            owner.Graveyard.Remove(card);
+            owner.Deck.Remove(card);
+            owner.Banished.Remove(card);
+            card.FaceUp = true;
+            card.AttackPosition = attackPosition;
+            card.SummonedTurnNumber = turnNumber;
+            card.HasAttacked = false;
+            card.HasChangedPositionThisTurn = false;
+            owner.MonsterZones[zone] = card;
+            Log(owner.Name + " Special Summoned " + card.Definition.DisplayName + ".");
+            ResolveSummonTriggers(owner, card, false);
+        }
+
+        private bool ActivateCallOfTheHaunted(DuelPlayer owner, CardInstance source, CardInstance target)
+        {
+            DuelPlayer cardOwner = Human.Graveyard.Contains(target) ? Human :
+                Opponent.Graveyard.Contains(target) ? Opponent : null;
+            if (source == null || !owner.SpellTrapZones.Contains(source) || cardOwner == null ||
+                !target.Definition.IsMonster || FindEmptyMonsterZone(owner) < 0)
+                return Reject("Call of the Haunted needs a Set Trap, a monster in either Graveyard, and an open Monster Zone.");
+
+            int zone = FindEmptyMonsterZone(owner);
+            cardOwner.Graveyard.Remove(target);
+            target.FaceUp = true;
+            target.AttackPosition = true;
+            target.SummonedTurnNumber = turnNumber;
+            owner.MonsterZones[zone] = target;
+            source.EquippedMonster = target;
+            source.FaceUp = true;
+            Log(owner.Name + " Special Summoned " + target.Definition.DisplayName + " with Call of the Haunted.");
+            ResolveSummonTriggers(owner, target, false);
+            return true;
         }
 
         private bool IsOnSpellTrapField(CardInstance card)
@@ -2260,6 +3000,174 @@ namespace DuelPrototype
             if (Opponent.SpellTrapZones.Contains(card) || Opponent.FieldSpellZone == card)
                 return Opponent;
             return null;
+        }
+
+        private DuelPlayer GetMonsterOwner(CardInstance card)
+        {
+            if (card == null)
+                return null;
+            if (Human.MonsterZones.Contains(card))
+                return Human;
+            if (Opponent.MonsterZones.Contains(card))
+                return Opponent;
+            return null;
+        }
+
+        private bool BeginDeckChoice(
+            DuelPlayer owner,
+            CardInstance source,
+            Func<CardInstance, bool> filter,
+            bool toGraveyard,
+            string prompt,
+            bool applySanganRestriction = false)
+        {
+            List<CardInstance> choices = owner.Deck.Where(filter).ToList();
+            if (choices.Count == 0)
+                return Reject("No cards in the Deck match this effect.");
+
+            if (owner.IsAi)
+            {
+                CardInstance choice = choices
+                    .OrderByDescending(card => card.Definition.Effect != CardEffect.None)
+                    .ThenByDescending(card => card.Definition.Attack)
+                    .First();
+                CompleteDeckChoice(owner, choice, toGraveyard, applySanganRestriction);
+                return true;
+            }
+
+            pendingDeckChoiceOwner = owner;
+            pendingDeckChoiceSource = source;
+            pendingDeckChoiceFilter = filter;
+            pendingDeckChoicePrompt = prompt;
+            pendingDeckChoiceToGraveyard = toGraveyard;
+            pendingDeckChoiceSanganRestriction = applySanganRestriction;
+            Log(owner.Name + " must choose a card from the Deck.");
+            return true;
+        }
+
+        private void CompleteDeckChoice(
+            DuelPlayer owner,
+            CardInstance card,
+            bool toGraveyard,
+            bool applySanganRestriction)
+        {
+            owner.Deck.Remove(card);
+            if (toGraveyard)
+            {
+                owner.Graveyard.Add(card);
+                Log(owner.Name + " sent " + card.Definition.DisplayName + " from the Deck to the Graveyard.");
+                return;
+            }
+
+            owner.Hand.Add(card);
+            if (applySanganRestriction)
+            {
+                temporarilyDisabledCardName = card.Definition.DisplayName;
+                temporarilyDisabledCardOwner = owner;
+                temporarilyDisabledCardTurn = turnNumber;
+                Log(owner.Name + " added " + card.Definition.DisplayName +
+                    " to hand with Sangan. That card's effects cannot be activated this turn.");
+                return;
+            }
+            Log(owner.Name + " added " + card.Definition.DisplayName + " from the Deck to the hand.");
+            if (pendingDeckChoiceSource != null &&
+                pendingDeckChoiceSource.Definition.Effect == CardEffect.Tuning &&
+                owner.Deck.Count > 0)
+            {
+                CardInstance milled = owner.Deck[0];
+                owner.Deck.RemoveAt(0);
+                owner.Graveyard.Add(milled);
+                Log(owner.Name + " sent " + milled.Definition.DisplayName +
+                    " from the top of the Deck to the Graveyard.");
+            }
+        }
+
+        private void ClearDeckChoice()
+        {
+            pendingDeckChoiceOwner = null;
+            pendingDeckChoiceSource = null;
+            pendingDeckChoiceFilter = null;
+            pendingDeckChoicePrompt = "";
+            pendingDeckChoiceToGraveyard = false;
+            pendingDeckChoiceSanganRestriction = false;
+        }
+
+        private static bool MatchesDeckEffectFilter(CardDefinition effect, CardInstance candidate)
+        {
+            if (effect == null || candidate == null || !candidate.Definition.CanBeMainDeck)
+                return false;
+            CardDefinition definition = candidate.Definition;
+            if (effect.Effect == CardEffect.SendMonsterFromDeckToGraveyard && !definition.IsMonster)
+                return false;
+            if (!string.IsNullOrWhiteSpace(effect.EffectTargetMonsterType) &&
+                !string.Equals(effect.EffectTargetMonsterType, definition.MonsterType,
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (effect.EffectTargetMaxLevel > 0 && definition.Level > effect.EffectTargetMaxLevel)
+                return false;
+            if (effect.EffectTargetMaxAttack > 0 && definition.Attack > effect.EffectTargetMaxAttack)
+                return false;
+            return true;
+        }
+
+        private bool DiscardCards(DuelPlayer owner, CardInstance excludedCard, int count, string sourceName)
+        {
+            List<CardInstance> candidates = owner.Hand.Where(card => card != excludedCard).ToList();
+            if (candidates.Count < count)
+                return false;
+
+            List<CardInstance> discarded = candidates
+                .OrderBy(card => card.Definition.Effect == CardEffect.None ? 0 : 1)
+                .ThenBy(card => card.Definition.Attack)
+                .Take(count)
+                .ToList();
+            foreach (CardInstance card in discarded)
+            {
+                owner.Hand.Remove(card);
+                card.FaceUp = false;
+                owner.Graveyard.Add(card);
+            }
+            if (discarded.Count > 0)
+                Log(owner.Name + " discarded " + discarded.Count + " card(s) for " + sourceName + ".");
+            return true;
+        }
+
+        private void ReturnAllSpellTrapsToHand(DuelPlayer owner)
+        {
+            foreach (CardInstance card in owner.SpellTrapZones.Where(item => item != null).ToList())
+            {
+                RemoveFromSpellTrapZones(owner, card);
+                card.FaceUp = false;
+                owner.Hand.Add(card);
+                Log(card.Definition.DisplayName + " returned to " + owner.Name + "'s hand.");
+            }
+
+            if (owner.FieldSpellZone == null)
+                return;
+            CardInstance fieldSpell = owner.FieldSpellZone;
+            owner.FieldSpellZone = null;
+            fieldSpell.FaceUp = false;
+            owner.Hand.Add(fieldSpell);
+            Log(fieldSpell.Definition.DisplayName + " returned to " + owner.Name + "'s hand.");
+        }
+
+        private bool ReviveFromGraveyard(DuelPlayer owner, CardInstance target)
+        {
+            DuelPlayer cardOwner = Human.Graveyard.Contains(target) ? Human :
+                Opponent.Graveyard.Contains(target) ? Opponent : null;
+            int zone = FindEmptyMonsterZone(owner);
+            if (cardOwner == null || zone < 0 || !target.Definition.IsMonster ||
+                target.Definition.Kind == CardKind.Token || owner.SummonsLockedThisTurn)
+                return Reject("That monster cannot be Special Summoned from the Graveyard.");
+
+            cardOwner.Graveyard.Remove(target);
+            target.FaceUp = true;
+            target.AttackPosition = true;
+            target.SummonedTurnNumber = turnNumber;
+            owner.MonsterZones[zone] = target;
+            Log(owner.Name + " Special Summoned " + target.Definition.DisplayName + " from the Graveyard.");
+            ResolveSummonTriggers(owner, target, false);
+            return true;
         }
 
         private void DrawCard(DuelPlayer player)
@@ -2335,7 +3243,11 @@ namespace DuelPrototype
                 return;
 
             RemoveFromMonsterZones(owner, monster);
-            owner.Graveyard.Add(monster);
+            monster.DestroyAtEndPhaseTurn = 0;
+            if (monster.BanishWhenLeavingField)
+                owner.Banished.Add(monster);
+            else
+                owner.Graveyard.Add(monster);
             if (monster.Definition.Effect != CardEffect.SanganSearch || owner.SanganEffectUsedThisTurn)
                 return;
 
@@ -2346,36 +3258,23 @@ namespace DuelPrototype
                     "'s effect for the rest of this turn.");
                 return;
             }
-            List<CardInstance> eligible = owner.Deck
-                .Where(card => card.Definition.IsMonster && card.Definition.CanBeMainDeck &&
-                    card.Definition.Attack <= 1500)
-                .ToList();
-            if (eligible.Count == 0)
+            bool IsEligible(CardInstance card) => card.Definition.IsMonster &&
+                card.Definition.CanBeMainDeck && card.Definition.Attack <= 1500;
+            if (!owner.Deck.Any(IsEligible))
             {
                 Log(owner.Name + "'s Sangan was sent to the Graveyard, but no monster with 1500 or less ATK remains in the Deck.");
                 return;
             }
 
-            if (owner.IsAi)
-            {
-                CardInstance choice = eligible.OrderByDescending(card => card.Definition.Attack).First();
-                owner.Deck.Remove(choice);
-                owner.Hand.Add(choice);
-                temporarilyDisabledCardName = choice.Definition.DisplayName;
-                temporarilyDisabledCardOwner = owner;
-                temporarilyDisabledCardTurn = turnNumber;
-                Log(owner.Name + " added " + choice.Definition.DisplayName +
-                    " to hand with Sangan. That card's effects cannot be activated this turn.");
-                return;
-            }
-
-            pendingSanganOwner = owner;
-            pendingSanganSource = monster;
-            Log(owner.Name + " must choose a monster with 1500 or less ATK for Sangan.");
+            BeginDeckChoice(owner, monster, IsEligible, false,
+                "Choose a monster with 1500 or less ATK.", true);
         }
 
         private void RemoveFromSpellTrapZones(DuelPlayer player, CardInstance card)
         {
+            CardInstance hauntedMonster = card.Definition.Effect == CardEffect.CallOfTheHaunted
+                ? card.EquippedMonster
+                : null;
             bool removed = false;
             for (int i = 0; i < player.SpellTrapZones.Length; i++)
             {
@@ -2392,6 +3291,12 @@ namespace DuelPrototype
             }
             if (!removed)
                 return;
+            if (hauntedMonster != null)
+            {
+                DuelPlayer monsterOwner = GetMonsterOwner(hauntedMonster);
+                if (monsterOwner != null)
+                    SendMonsterToGraveyard(monsterOwner, hauntedMonster);
+            }
             DuelPlayer affected = GetOpponent(player);
             if (card.Definition.Effect == CardEffect.SwordsOfRevealingLight &&
                 !HasActiveDurationSpell(player, CardEffect.SwordsOfRevealingLight))

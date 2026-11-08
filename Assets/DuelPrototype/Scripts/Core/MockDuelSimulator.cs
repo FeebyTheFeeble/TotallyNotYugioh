@@ -11,7 +11,8 @@ namespace DuelPrototype
         PlayerMonster = 1,
         OpponentMonster = 2,
         OpponentSetTrap = 4,
-        PlayerGraveyardMonster = 8
+        PlayerGraveyardMonster = 8,
+        AutomaticEffectSupport = 16
     }
 
     public sealed class MockDuelSimulator
@@ -68,6 +69,8 @@ namespace DuelPrototype
             }
             if ((fixtures & MockDuelFixtures.PlayerGraveyardMonster) != 0)
                 engine.Human.Graveyard.Add(new CardInstance(fixtureMonster));
+            if (AddEffectSupport(engine, focusCard, engine.TurnNumber))
+                fixtures |= MockDuelFixtures.AutomaticEffectSupport;
 
             engine.AdvanceToPhase(DuelPhase.MainOne);
             return new MockDuelSimulator(engine, focusCard, fixtures);
@@ -100,6 +103,40 @@ namespace DuelPrototype
             {
                 SummonedTurnNumber = turnNumber
             };
+        }
+
+        private static bool AddEffectSupport(DuelEngine engine, CardInstance focusCard, int turnNumber)
+        {
+            if (focusCard.Definition.Effect != CardEffect.BlackwingSpecialSummon ||
+                engine.Human.MonsterZones.Any(card => card != null && card.FaceUp &&
+                    card.Definition.DisplayName.StartsWith("Blackwing", StringComparison.OrdinalIgnoreCase)))
+                return false;
+
+            CardDefinition supportDefinition = StarterCatalog.All.FirstOrDefault(card =>
+                card.CanNormalSummon && card.DisplayName.StartsWith("Blackwing", StringComparison.OrdinalIgnoreCase) &&
+                card.CardId != focusCard.Definition.CardId);
+            if (supportDefinition == null)
+                throw new InvalidOperationException("No Blackwing support card is available for this test.");
+
+            CardInstance support = engine.Human.Hand.FirstOrDefault(card =>
+                card.Definition.CardId == supportDefinition.CardId) ??
+                engine.Human.Deck.FirstOrDefault(card => card.Definition.CardId == supportDefinition.CardId);
+            if (support != null)
+            {
+                engine.Human.Hand.Remove(support);
+                engine.Human.Deck.Remove(support);
+            }
+            else
+                support = new CardInstance(supportDefinition);
+
+            int zone = Array.FindIndex(engine.Human.MonsterZones, card => card == null);
+            if (zone < 0)
+                throw new InvalidOperationException("No Monster Zone is available for automatic effect support.");
+            support.FaceUp = true;
+            support.AttackPosition = true;
+            support.SummonedTurnNumber = turnNumber;
+            engine.Human.MonsterZones[zone] = support;
+            return true;
         }
     }
 }
