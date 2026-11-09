@@ -36,7 +36,10 @@ namespace DuelPrototype
             new Dictionary<string, ImportedEffect>(StringComparer.Ordinal)
             {
                 { "5318639", new ImportedEffect(CardEffect.DestroySpellTrap) },
+                { "19613556", new ImportedEffect(CardEffect.DestroyAllSpellTraps) },
+                { "18144507", new ImportedEffect(CardEffect.DestroyOpponentSpellTraps) },
                 { "26202165", new ImportedEffect(CardEffect.SanganSearch, targetMaxAttack: 1500) },
+                { "83968380", new ImportedEffect(CardEffect.DrawOne) },
                 { "55144522", new ImportedEffect(CardEffect.DrawTwo) },
                 { "32807846", new ImportedEffect(CardEffect.SearchDeckToHand,
                     targetMonsterType: "Warrior", targetMaxLevel: 4) },
@@ -49,6 +52,8 @@ namespace DuelPrototype
                 { "97169186", new ImportedEffect(CardEffect.DestroyHighestDefenseMonster) },
                 { "42703248", new ImportedEffect(CardEffect.ReturnAllSpellTrapsToHand) },
                 { "83764719", new ImportedEffect(CardEffect.ReviveMonsterFromGraveyard) }
+                ,{ "34124316", new ImportedEffect(CardEffect.CyberJar) }
+                ,{ "71044499", new ImportedEffect(CardEffect.NoblemanOfCrossout) }
                 ,{ "25862681", new ImportedEffect(CardEffect.AncientFairyDragon) }
                 ,{ "73580471", new ImportedEffect(CardEffect.BlackRoseDragon) }
                 ,{ "91351370", new ImportedEffect(CardEffect.BlackWhirlwindSearch) }
@@ -70,10 +75,15 @@ namespace DuelPrototype
                 ,{ "70095154", new ImportedEffect(CardEffect.CyberDragonSummon) }
                 ,{ "14943837", new ImportedEffect(CardEffect.DebrisDragonRevive) }
                 ,{ "87621407", new ImportedEffect(CardEffect.DekoichiDraw) }
+                ,{ "15341821", new ImportedEffect(CardEffect.DandylionTokens) }
                 ,{ "59839761", new ImportedEffect(CardEffect.DestroySetOpponentBackrow) }
                 ,{ "53855409", new ImportedEffect(CardEffect.Doppelwarrior) }
                 ,{ "3429238", new ImportedEffect(CardEffect.DrillWarrior) }
                 ,{ "50091196", new ImportedEffect(CardEffect.FormulaSynchronDraw) }
+                ,{ "58518520", new ImportedEffect(CardEffect.ClearEffector) }
+                ,{ "90953320", new ImportedEffect(CardEffect.TGHyperLibrarian) }
+                ,{ "55013285", new ImportedEffect(CardEffect.TroopDragonSummon) }
+                ,{ "78010363", new ImportedEffect(CardEffect.WitchOfTheBlackForestSearch) }
                 ,{ "7391448", new ImportedEffect(CardEffect.GoyoGuardianRevive) }
                 ,{ "53567095", new ImportedEffect(CardEffect.IcarusAttack) }
                 ,{ "77585513", new ImportedEffect(CardEffect.JinzoTrapLock) }
@@ -110,13 +120,22 @@ namespace DuelPrototype
                 ,{ "96363153", new ImportedEffect(CardEffect.Tuning) }
                 ,{ "92676637", new ImportedEffect(CardEffect.TuningwareDraw) }
                 ,{ "67270095", new ImportedEffect(CardEffect.TurboSynchron) }
-                ,{ "44095762", new ImportedEffect(CardEffect.StopAttack) }
+                ,{ "44095762", new ImportedEffect(CardEffect.MirrorForce) }
+                ,{ "70342110", new ImportedEffect(CardEffect.DimensionalPrison) }
+                ,{ "94192409", new ImportedEffect(CardEffect.CompulsoryEvacuationDevice) }
+                ,{ "29401950", new ImportedEffect(CardEffect.BottomlessTrapHole) }
+                ,{ "77414722", new ImportedEffect(CardEffect.CounterSpell) }
+                ,{ "49010598", new ImportedEffect(CardEffect.CounterMonsterEffect) }
+                ,{ "14315573", new ImportedEffect(CardEffect.StopAttack) }
+                ,{ "60082869", new ImportedEffect(CardEffect.DestroySpellTrap) }
+                ,{ "4178474", new ImportedEffect(CardEffect.RaigekiBreak) }
+                ,{ "70231910", new ImportedEffect(CardEffect.DarkCoreBanish) }
             };
 
         private static readonly HashSet<string> TunerCardIds = new HashSet<string>(StringComparer.Ordinal)
         {
             "63977008", "71971554", "67270095", "20932152", "50091196",
-            "14943837", "22835145", "2009101", "92676637", "21159309",
+            "14943837", "22835145", "2009101", "21159309",
             "40975574", "97021916", "46710683"
         };
 

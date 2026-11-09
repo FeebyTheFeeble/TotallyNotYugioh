@@ -262,6 +262,7 @@ namespace DuelPrototype
         private const float HumanMonsterY = 0.39f;
         private const float HumanSpellTrapY = 0.22f;
         private static DuelPrototypeApp instance;
+        private static Sprite activationBlockedIconSprite;
 
         private readonly Color backgroundColor = new Color(0.035f, 0.055f, 0.085f);
         private readonly Color panelColor = new Color(0.075f, 0.105f, 0.15f);
@@ -469,23 +470,23 @@ namespace DuelPrototype
             profile = string.IsNullOrEmpty(json) ? null : JsonUtility.FromJson<PlayerProfile>(json);
             if (profile == null || profile.collection == null || profile.deck == null)
             {
-                profile = new PlayerProfile { credits = 500, catalogVersion = 4 };
+                profile = new PlayerProfile { credits = 500, catalogVersion = 5 };
                 AddPresetToProfile(StarterCatalog.StructureDecks[0]);
                 SaveProfile();
             }
-            else if (profile.catalogVersion < 4)
+            else if (profile.catalogVersion < 5)
             {
                 profile.deck.RemoveAll(id => StarterCatalog.Find(id) == null);
                 profile.collection.RemoveAll(item => item == null || StarterCatalog.Find(item.id) == null);
                 ClampDeckToCopyLimits();
                 int mainCount = profile.deck.Select(StarterCatalog.Find)
                     .Count(card => card != null && card.CanBeMainDeck);
-                if (mainCount < 20)
+                if (mainCount < DuelEngine.MinimumMainDeckSize)
                 {
                     profile.deck.Clear();
                     AddPresetToProfile(StarterCatalog.StructureDecks[0]);
                 }
-                profile.catalogVersion = 4;
+                profile.catalogVersion = 5;
                 SaveProfile();
             }
         }
@@ -534,11 +535,14 @@ namespace DuelPrototype
                 .Where(card => card != null)
                 .ToList();
             int mainCount = deck.Count(card => card.CanBeMainDeck);
-            if (mainCount < 20 || !HasValidDeckCopyCounts(deck))
+            if (mainCount < DuelEngine.MinimumMainDeckSize || mainCount > 40 ||
+                !HasValidDeckCopyCounts(deck))
             {
-                notice = mainCount < 20
-                    ? "Your Main Deck needs at least 20 cards. Restore it in Deck Builder to start a duel."
-                    : "Your deck exceeds a card's copy limit. Correct it in Deck Builder before starting a duel.";
+                notice = mainCount < DuelEngine.MinimumMainDeckSize
+                    ? "Your Main Deck needs at least 40 cards. Restore it in Deck Builder to start a duel."
+                    : mainCount > 40
+                        ? "Your Main Deck cannot exceed 40 cards. Correct it in Deck Builder before starting a duel."
+                        : "Your deck exceeds a card's copy limit. Correct it in Deck Builder before starting a duel.";
                 engine = null;
                 return;
             }
@@ -557,11 +561,14 @@ namespace DuelPrototype
                 .Where(card => card != null)
                 .ToList();
             int mainCount = deck.Count(card => card.CanBeMainDeck);
-            if (mainCount < 20 || !HasValidDeckCopyCounts(deck))
+            if (mainCount < DuelEngine.MinimumMainDeckSize || mainCount > 40 ||
+                !HasValidDeckCopyCounts(deck))
             {
-                notice = mainCount < 20
-                    ? "Your Main Deck needs at least 20 cards. Restore it in Deck Builder to start a duel."
-                    : "Your deck exceeds a card's copy limit. Correct it in Deck Builder before starting a duel.";
+                notice = mainCount < DuelEngine.MinimumMainDeckSize
+                    ? "Your Main Deck needs at least 40 cards. Restore it in Deck Builder to start a duel."
+                    : mainCount > 40
+                        ? "Your Main Deck cannot exceed 40 cards. Correct it in Deck Builder before starting a duel."
+                        : "Your deck exceeds a card's copy limit. Correct it in Deck Builder before starting a duel.";
                 engine = null;
                 Render();
                 return;
@@ -1907,7 +1914,20 @@ namespace DuelPrototype
 
         private void OnPhaseStarted(DuelPhase phase)
         {
-            if (phase == DuelPhase.GameOver || engine == null || canvas == null)
+            if (engine == null || canvas == null)
+                return;
+
+            if (phase == DuelPhase.GameOver && screen == ScreenMode.Duel)
+            {
+                bool playerWon = engine.Winner == engine.Human.Name;
+                Color resultColor = playerWon ? accentColor : new Color(0.78f, 0.18f, 0.22f);
+                QueuePhaseTicker(playerWon ? "YOU WIN!" : "YOU LOST!",
+                    backgroundColor: resultColor,
+                    edgeColor: Color.Lerp(resultColor, Color.white, 0.22f));
+                return;
+            }
+
+            if (phase == DuelPhase.GameOver)
                 return;
             string activePlayer = engine.CurrentPlayer == engine.Human ? "PLAYER" : "OPPONENT";
             Color turnColor = GetTurnColor(engine.CurrentPlayer == engine.Human);
@@ -2666,8 +2686,54 @@ namespace DuelPrototype
                 AddCardArtPlaceholder(slot, displayedCard != null && displayedCard.FaceUp
                         ? displayedCard.Definition : null,
                     0f, 0f, 1f, 1f, displayedCard == null || displayedCard.FaceUp);
+                if (displayedCard != null && !displayedCard.FaceUp &&
+                    engine != null && engine.IsTrapActivationBlockedByJinzo(displayedCard))
+                    AddActivationBlockedIcon(slot);
                 AddSpellTrapTargetHover(slot, card);
             }
+        }
+
+        private static void AddActivationBlockedIcon(RectTransform parent)
+        {
+            if (activationBlockedIconSprite == null)
+            {
+                const int size = 48;
+                Texture2D texture = new Texture2D(size, size, TextureFormat.RGBA32, false);
+                texture.name = "Trap activation blocked icon";
+                Color32[] pixels = new Color32[size * size];
+                Vector2 center = new Vector2((size - 1) * 0.5f, (size - 1) * 0.5f);
+                for (int y = 0; y < size; y++)
+                {
+                    for (int x = 0; x < size; x++)
+                    {
+                        Vector2 point = new Vector2(x, y);
+                        float radius = Vector2.Distance(point, center);
+                        float slashDistance = Mathf.Abs((x + y) - (size - 1)) / Mathf.Sqrt(2f);
+                        bool ring = radius >= 16f && radius <= 21f;
+                        bool slash = slashDistance <= 2.5f && radius <= 20f;
+                        pixels[y * size + x] = ring || slash
+                            ? new Color32(235, 35, 45, 255)
+                            : new Color32(0, 0, 0, 0);
+                    }
+                }
+                texture.SetPixels32(pixels);
+                texture.Apply();
+                activationBlockedIconSprite = Sprite.Create(texture, new Rect(0, 0, size, size),
+                    new Vector2(0.5f, 0.5f));
+            }
+
+            GameObject iconObject = new GameObject("Activation blocked", typeof(RectTransform),
+                typeof(CanvasRenderer), typeof(Image));
+            iconObject.transform.SetParent(parent, false);
+            RectTransform rect = iconObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0.68f, 0.68f);
+            rect.anchorMax = new Vector2(0.96f, 0.96f);
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            Image image = iconObject.GetComponent<Image>();
+            image.sprite = activationBlockedIconSprite;
+            image.preserveAspect = true;
+            image.raycastTarget = false;
         }
 
         private static void FitMonsterSlotStats(RectTransform slot, CardInstance card)
@@ -2701,8 +2767,9 @@ namespace DuelPrototype
             float labelY = screen == ScreenMode.AiLab
                 ? (opponent ? 0.73f : 0.17f)
                 : yMin + BoardCardHeight + 0.002f;
-            AddText(contentRoot, "FIELD", xMin, labelY, xMin + BoardCardWidth,
-                labelY + 0.02f, 9, mutedColor, TextAnchor.MiddleCenter, true);
+            if (!opponent)
+                AddText(contentRoot, "FIELD", xMin, labelY, xMin + BoardCardWidth,
+                    labelY + 0.02f, 9, mutedColor, TextAnchor.MiddleCenter, true);
             RectTransform slot = AddButton(contentRoot,
                 displayedCard == null ? "FIELD\nSLOT" : CardLabel(displayedCard, opponent),
                 xMin, yMin, xMin + BoardCardWidth, yMin + BoardCardHeight,
@@ -2787,6 +2854,11 @@ namespace DuelPrototype
                 rightClick.OnRightClick = OpenForfeitConfirmation;
             }
             AddCardArtPlaceholder(button, null, 0.06f, 0.06f, 0.94f, 0.94f, false);
+            Text label = button.Find("Label").GetComponent<Text>();
+            SetAnchors(label.rectTransform, 0.02f, 0.02f, 0.98f, 0.4f);
+            label.resizeTextForBestFit = true;
+            label.resizeTextMinSize = 5;
+            label.resizeTextMaxSize = 9;
         }
 
         private void DrawGraveyardButton(DuelPlayer owner, float xMin, float yMin)
@@ -3079,16 +3151,13 @@ namespace DuelPrototype
         private string CardLabel(CardInstance card, bool hidden)
         {
             if (!card.FaceUp)
-                return "FACE-DOWN\nDEFENSE";
+                return "SET CARD";
 
             if (!card.Definition.IsMonster)
-                return card.Definition.DisplayName + "\nFACE-UP";
+                return card.Definition.DisplayName;
 
-            string position = card.AttackPosition
-                ? "FACE-UP ATK"
-                : "FACE-UP DEF";
             return card.Definition.DisplayName + "\nATK " + card.CurrentAttack + " / DEF " +
-                   card.Definition.Defense + "\n" + position;
+                   card.Definition.Defense;
         }
 
         private void OnZoneClicked(CardInstance card, bool opponent)
@@ -3234,10 +3303,15 @@ namespace DuelPrototype
                             CardInstance effectTarget = selectedHandCard.Definition.Effect == CardEffect.MysticBox ||
                                 selectedHandCard.Definition.Effect == CardEffect.DestroySpellTrap
                                 ? selectedTarget
+                                : selectedHandCard.Definition.Effect == CardEffect.NoblemanOfCrossout
+                                    ? selectedTarget ?? selectedMonsterCard
                                 : selectedMonsterCard;
                             string actionLabel = selectedHandCard.Definition.Effect == CardEffect.DestroySpellTrap &&
                                 selectedTarget != null
                                 ? "DESTROY SELECTED"
+                                : selectedHandCard.Definition.Effect == CardEffect.NoblemanOfCrossout &&
+                                  effectTarget != null
+                                    ? "CROSS OUT SELECTED"
                                 : selectedHandCard.Definition.Effect == CardEffect.ReviveMonsterFromGraveyard
                                     ? "OPEN GRAVEYARD TO SELECT"
                                 : "ACTIVATE SPELL";
@@ -3534,7 +3608,7 @@ namespace DuelPrototype
                             selectedMaterials.Clear();
                         }
                         Render();
-                    }, 10, card.Definition);
+                    }, 10, card.Definition, true);
                 DuelCardDragHandler dragHandler = cardButton.gameObject.AddComponent<DuelCardDragHandler>();
                 dragHandler.Card = card;
                 cardButton.gameObject.AddComponent<DuelHandCardVisual>().Card = card;
@@ -3859,14 +3933,17 @@ namespace DuelPrototype
             int extraCount = profile.deck.Select(StarterCatalog.Find)
                 .Count(card => card != null && card.CanBeExtraDeck);
             bool withinCopyLimits = HasValidDeckCopyCounts(profile.deck.Select(StarterCatalog.Find));
-            bool valid = mainCount >= 20 && mainCount <= 40 && extraCount <= 15 && withinCopyLimits;
+            bool valid = mainCount >= DuelEngine.MinimumMainDeckSize &&
+                mainCount <= 40 && extraCount <= 15 && withinCopyLimits;
             AddText(contentRoot, "DECK BUILDER", 0.035f, 0.84f, 0.38f, 0.89f,
                 24, Color.white, TextAnchor.MiddleLeft, true);
             AddText(contentRoot, "MAIN " + mainCount + "/40     EXTRA " + extraCount + "/15",
                 0.44f, 0.845f, 0.7f, 0.89f, 13,
                 valid ? accentColor : new Color(1f, 0.65f, 0.32f), TextAnchor.MiddleRight, true);
             string deckStatus = valid ? "READY TO DUEL" :
-                !withinCopyLimits ? "CARD COPY LIMIT EXCEEDED" : "MAIN DECK NEEDS 20–40 CARDS";
+                !withinCopyLimits ? "CARD COPY LIMIT EXCEEDED" :
+                mainCount < DuelEngine.MinimumMainDeckSize ? "MAIN DECK NEEDS 40 CARDS" :
+                mainCount > 40 ? "MAIN DECK MAX IS 40 CARDS" : "EXTRA DECK MAX IS 15 CARDS";
             AddText(contentRoot, deckStatus,
                 0.71f, 0.845f, 0.965f, 0.89f, 12,
                 valid ? accentColor : new Color(1f, 0.65f, 0.32f), TextAnchor.MiddleRight, true);
@@ -4509,7 +4586,7 @@ namespace DuelPrototype
             else if (count == 0)
                 notice = "That card is not in your deck.";
             else if (card.CanBeMainDeck && mainCount <= 20)
-                notice = "Keep at least 20 cards in your Main Deck.";
+                notice = "Keep at least 40 cards in your Main Deck.";
             else
             {
                 profile.deck.Remove(card.CardId);
@@ -5465,7 +5542,10 @@ namespace DuelPrototype
             }
         }
 
-        private void AttachCardHover(RectTransform rect, CardDefinition definition)
+        private void AttachCardHover(
+            RectTransform rect,
+            CardDefinition definition,
+            bool centerPreviewOnHover = false)
         {
             if (rect == null || definition == null)
                 return;
@@ -5473,8 +5553,8 @@ namespace DuelPrototype
             EventTrigger.Entry enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
             enter.callback.AddListener(data =>
             {
-                if (screen != ScreenMode.Duel)
-                    ShowCardPreview(definition, data as PointerEventData);
+                if (screen != ScreenMode.Duel || centerPreviewOnHover)
+                    ShowCardPreview(definition, data as PointerEventData, centerPreviewOnHover);
             });
             trigger.triggers.Add(enter);
             EventTrigger.Entry exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
@@ -5489,7 +5569,10 @@ namespace DuelPrototype
             };
         }
 
-        private void ShowCardPreview(CardDefinition definition, PointerEventData eventData)
+        private void ShowCardPreview(
+            CardDefinition definition,
+            PointerEventData eventData,
+            bool centerOnScreen = false)
         {
             if (definition == null || cardPreviewRoot == null || eventData == null)
                 return;
@@ -5511,7 +5594,11 @@ namespace DuelPrototype
                 float previewWidth = previewHeight * 5f / 7f;
                 cardPreviewRoot.sizeDelta = new Vector2(previewWidth, previewHeight);
 
-                if (RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                if (centerOnScreen)
+                {
+                    cardPreviewRoot.localPosition = new Vector3(-previewWidth * 0.5f, previewHeight * 0.5f, 0);
+                }
+                else if (RectTransformUtility.ScreenPointToLocalPointInRectangle(
                         canvasRect, eventData.position, eventData.pressEventCamera, out Vector2 localPoint))
                 {
                     Rect targetBounds = GetHoverTargetBounds(eventData, canvasRect, localPoint);
@@ -5723,7 +5810,8 @@ namespace DuelPrototype
             Color color,
             Action callback,
             int fontSize,
-            CardDefinition hoverCard = null)
+            CardDefinition hoverCard = null,
+            bool centerPreviewOnHover = false)
         {
             RectTransform rect = CreateRect("Button", parent);
             SetAnchors(rect, xMin, yMin, xMax, yMax);
@@ -5750,7 +5838,7 @@ namespace DuelPrototype
             text.verticalOverflow = VerticalWrapMode.Truncate;
             text.raycastTarget = false;
 
-            AttachCardHover(rect, hoverCard);
+            AttachCardHover(rect, hoverCard, centerPreviewOnHover);
             return rect;
         }
 

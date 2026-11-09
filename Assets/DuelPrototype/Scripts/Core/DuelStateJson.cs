@@ -100,6 +100,8 @@ namespace DuelPrototype
                     RequireCardReference(materialId, card.instanceId, cards);
                 if (!string.IsNullOrEmpty(card.equippedMonsterId))
                     RequireCardReference(card.equippedMonsterId, card.instanceId, cards);
+                if (!string.IsNullOrEmpty(card.nitroWarriorSecondAttackTargetId))
+                    RequireCardReference(card.nitroWarriorSecondAttackTargetId, card.instanceId, cards);
             }
         }
 
