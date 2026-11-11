@@ -2476,7 +2476,7 @@ namespace DuelPrototype
 
         private AiActionCandidate FindBestAiMainPhaseAction(DuelPlayer actor)
         {
-            double baseline = DuelAiEvaluator.Evaluate(actor, GetOpponent(actor));
+            double baseline = DuelAiEvaluator.EvaluateForTurnPlan(actor, GetOpponent(actor));
             List<AiPlanNode> beam = new List<AiPlanNode>
             {
                 new AiPlanNode(this, actor, baseline, null)
@@ -2508,7 +2508,7 @@ namespace DuelPrototype
                         DuelPlayer simulatedActor = node.Actor == node.Engine.Human
                             ? simulation.Engine.Human
                             : simulation.Engine.Opponent;
-                        double score = DuelAiEvaluator.Evaluate(simulatedActor,
+                        double score = DuelAiEvaluator.EvaluateForTurnPlan(simulatedActor,
                             simulation.Engine.GetOpponent(simulatedActor));
                         AiActionCandidate firstAction = node.FirstAction ?? candidate;
                         if (score > bestScore + 0.01)
@@ -2573,6 +2573,8 @@ namespace DuelPrototype
                     CanActivateMonsterEffectFromHand(card.Definition.Effect))
                 .Concat(actor.MonsterZones.Where(card => card != null && card.FaceUp &&
                     card.Definition.Effect != CardEffect.None))
+                .Concat(actor.SpellTrapZones.Where(card => card != null && !card.FaceUp &&
+                    card.Definition.Kind == CardKind.Trap))
                 .Concat(actor.Graveyard.Where(card =>
                     CanActivateMonsterEffectFromGraveyard(card.Definition.Effect)))
                 .Distinct()
@@ -2580,6 +2582,17 @@ namespace DuelPrototype
             List<CardInstance> targets = GetAiEffectTargets(actor).ToList();
             foreach (CardInstance card in activatableCards)
             {
+                if (card.Definition.Effect == CardEffect.ReviveMonsterFromGraveyard)
+                {
+                    foreach (CardInstance target in targets)
+                    {
+                        if (double.IsNegativeInfinity(EvaluateAiActivation(actor, card, target)))
+                            continue;
+                        AddAiActivationCandidate(candidates, card, target, 1);
+                    }
+                    continue;
+                }
+
                 AddAiActivationCandidate(candidates, card, null,
                     card.Definition.Effect == CardEffect.QuickdrawSynchron ? 0 : 1);
                 foreach (CardInstance target in targets)

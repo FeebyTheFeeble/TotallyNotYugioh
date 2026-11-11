@@ -28,8 +28,8 @@ CSV / CardDefinition assets
 | `Data/CardDefinition.cs` | Card enums and ScriptableObject model: identity, type, stats, text, effect ID/value, deck limits, and catalog metadata. |
 | `Data/CardCatalogCsvImporter.cs` | Parses the catalog CSV and maps selected card IDs to explicit `CardEffect` mechanics. Imported text alone does not implement an effect. |
 | `Data/StarterCatalog.cs` | Loads `Resources/all_ygo_cards.csv`, then additional `Resources/CardCatalog` assets; provides lookup, starter data, and four themed deck presets. |
-| `Core/DuelEngine.cs` | Player/card instances and zones, phases, legal actions, summons, effect resolution, response windows, battle, turn flow, AI action execution, and winner detection. |
-| `Core/DuelAiEvaluator.cs` | Board/material valuation used by AI choices. It is a prototype heuristic, not a general strategy solver. |
+| `Core/DuelEngine.cs` | Player/card instances and zones, phases, legal actions, summons, effect resolution, response windows, battle, turn flow, AI action planning, and winner detection. |
+| `Core/DuelAiEvaluator.cs` | Board/material valuation used by AI action planning. It is a prototype heuristic, not a general strategy solver. |
 | `Core/DuelStateSnapshot.cs`, `DuelStateJson.cs` | Versioned snapshot DTOs plus JSON serialization, file loading, structural validation, and engine restoration. |
 | `Core/MockDuelSimulator.cs` | Creates focused in-game test-duel fixtures around a selected card. |
 | `Runtime/DuelPrototypeApp.cs` | Programmatic UI, input and rendering, screen navigation, replay/test-lab interactions, and local player profile. The profile uses `PlayerPrefs`; it is separate from duel-state snapshots. |
@@ -45,6 +45,12 @@ CSV / CardDefinition assets
 5. EditMode tests exercise mechanics and catalog identity. The report generator counts only the coverage its tests establish; do not infer coverage from imported text or mappings alone.
 
 When adding an effect, follow the existing ID → enum → resolver → behavior-test path. Test legal and illegal activation, targets/costs, zone transitions, turn/use limits, and AI behavior where applicable. Keep card-specific tests associated with every newly covered card ID.
+
+## AI turn planning
+
+During Main Phase 1, the AI builds candidate actions using the same `DuelEngine` legality methods as player actions, simulates short action sequences on cloned duel states, and scores resulting states with `DuelAiEvaluator`. It executes the first action of the best sequence, then replans from the live state. This lets the AI consider multi-action lines—such as normal summoning a Blackwing before special summoning Bora—without a Bora-specific decision branch.
+
+Search is intentionally bounded: depth 3, beam width 3, at most 18 candidates per state, 126 simulated candidates per plan, and at most 8 planned actions per AI turn. This remains a heuristic over implemented engine actions and effects; it does not read card text or guarantee optimal play. Add AI support by exposing legal actions through the engine and testing their simulated and live outcomes, rather than adding deck-specific combo scripts.
 
 ## Persistence and state snapshots
 

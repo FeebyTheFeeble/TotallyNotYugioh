@@ -14,6 +14,12 @@ namespace DuelPrototype
                    BoardValue(player, opponent) - BoardValue(opponent, player);
         }
 
+        public static double EvaluateForTurnPlan(DuelPlayer player, DuelPlayer opponent)
+        {
+            return Evaluate(player, opponent) +
+                   (BattlePositionValue(player, opponent) - BattlePositionValue(opponent, player)) * 0.4;
+        }
+
         public static double CardValue(CardInstance card)
         {
             if (card == null)
@@ -54,6 +60,34 @@ namespace DuelPrototype
             value += player.SpellTrapZones.Count(card => card != null) * 85;
             if (player.FieldSpellZone != null)
                 value += 100;
+            return value;
+        }
+
+        private static double BattlePositionValue(DuelPlayer player, DuelPlayer opponent)
+        {
+            int strongestThreat = opponent.MonsterZones
+                .Where(card => card != null && card.FaceUp && card.AttackPosition)
+                .Select(card => card.CurrentAttack)
+                .DefaultIfEmpty(0)
+                .Max();
+            if (strongestThreat == 0)
+                return 0;
+
+            double value = 0;
+            foreach (CardInstance monster in player.MonsterZones.Where(card => card != null))
+            {
+                if (monster.FaceUp && monster.AttackPosition)
+                {
+                    value += monster.CurrentAttack >= strongestThreat
+                        ? 300 + monster.CurrentAttack * 0.1
+                        : -250 - (strongestThreat - monster.CurrentAttack) * 0.35;
+                }
+                else
+                {
+                    value += 500 + Math.Max(0, monster.Definition.Defense - strongestThreat) * 0.1;
+                }
+            }
+
             return value;
         }
     }

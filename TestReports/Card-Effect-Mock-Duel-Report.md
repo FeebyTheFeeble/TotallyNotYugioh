@@ -1,6 +1,6 @@
 # Registered Card Behavior Test Report
 
-Generated: 2026-11-10 21:13:27
+Generated: 2026-11-11 04:09:57
 
 A card is considered working only when it has an explicitly associated card-specific behavior test and all associated tests pass. Imported text and effect mappings do not count as behavior coverage. Cards with imported effect mappings but without a passing behavior test are reported as FAIL.
 
@@ -47,8 +47,8 @@ Every unique catalog card is counted once. Vanilla normal monsters and Token def
 | Unique cards in the four structure decks | 68 |
 | Structure-deck cards with passing behavior tests | 68 |
 | Structure-deck cards failing behavior coverage | 0 |
-| Structure-deck-specific behavior tests | 126 |
-| Passing structure-deck-specific behavior tests | 126 |
+| Structure-deck-specific behavior tests | 128 |
+| Passing structure-deck-specific behavior tests | 128 |
 | Cards with imported effect mappings | 94 |
 | Mapped cards with passing behavior tests | 94 |
 | Mapped cards failing behavior coverage | 0 |
@@ -56,7 +56,7 @@ Every unique catalog card is counted once. Vanilla normal monsters and Token def
 | Non-structure mapped cards failing behavior coverage | 0 |
 | Non-structure card-specific behavior tests | 29 |
 | Mock-duel scenarios passed | 10 |
-| Card/effect report tests passed | 160 |
+| Card/effect report tests passed | 162 |
 | Card/effect report tests failed | 0 |
 
 The structure-deck table tracks all 68 cards in the four configured decks. The additional-card table tracks every catalog card with an imported effect mapping outside those decks. Other CSV cards with no imported effect mapping are not yet considered implemented or covered.
@@ -66,6 +66,8 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | Result | Test | Details |
 |---|---|---|
 | PASSED | Ai_attack_emits_the_same_attack_event_as_a_human_attack |  |
+| PASSED | Ai_plans_a_normal_summon_then_special_summons_Bora |  |
+| PASSED | Ai_special_summons_Bora_after_using_its_Normal_Summon |  |
 | PASSED | Ai_turn_steps_advance_only_one_phase_command_at_a_time |  |
 | PASSED | Ai_uses_Harpies_Feather_Duster_when_destroying_four_cards_is_profitable |  |
 | PASSED | Ancient_Fairy_Dragon_does_not_draw_on_Synchro_Summon_and_can_activate_both_Main_Phase_effects |  |
@@ -249,11 +251,11 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | 73580471 | Black Rose Dragon | PASS | Black_Rose_Dragon_destroys_all_field_cards_when_Synchro_Summoned: PASSED |
 | 91351370 | Black Whirlwind | PASS | Black_Whirlwind_searches_a_lower_ATK_Blackwing_after_a_Normal_Summon: PASSED |
 | 22835145 | Blackwing - Blizzard the Far North | PASS | Blackwing_Blizzard_revives_a_low_Level_Blackwing_in_Defense_Position: PASSED |
-| 49003716 | Blackwing - Bora the Spear | PASS | Blackwing_Bora_can_special_summon_while_another_Blackwing_is_controlled: PASSED |
+| 49003716 | Blackwing - Bora the Spear | PASS | Ai_plans_a_normal_summon_then_special_summons_Bora: PASSED; Ai_special_summons_Bora_after_using_its_Normal_Summon: PASSED; Blackwing_Bora_can_special_summon_while_another_Blackwing_is_controlled: PASSED |
 | 2009101 | Blackwing - Gale the Whirlwind | PASS | Blackwing_Gale_halves_a_face_up_opposing_monsters_attack: PASSED |
 | 85215458 | Blackwing - Kalut the Moon Shadow | PASS | Blackwing_Kalut_boosts_a_Blackwing_that_has_declared_an_attack: PASSED |
 | 46710683 | Blackwing - Mistral the Silver Shield | PASS | Blackwing_Mistral_prevents_the_next_battle_damage_after_it_is_destroyed: PASSED |
-| 58820853 | Blackwing - Shura the Blue Flame | PASS | Blackwing_Shura_summons_a_low_attack_Blackwing_after_battle: PASSED |
+| 58820853 | Blackwing - Shura the Blue Flame | PASS | Ai_plans_a_normal_summon_then_special_summons_Bora: PASSED; Blackwing_Shura_summons_a_low_attack_Blackwing_after_battle: PASSED |
 | 33236860 | Blackwing - Silverwind the Ascendant | PASS | Blackwing_Silverwind_destroys_up_to_two_lower_DEF_face_up_monsters: PASSED; Silverwind_lets_the_controller_choose_up_to_two_valid_targets_instead_of_choosing_for_them: PASSED; Silverwind_protects_only_the_first_Blackwing_that_would_be_destroyed_by_battle_each_opponent_turn: PASSED |
 | 75498415 | Blackwing - Sirocco the Dawn | PASS | Blackwing_Sirocco_boosts_a_selected_Blackwing_by_other_Blackwings_attack: PASSED |
 | 72714392 | Blackwing - Vayu the Emblem of Honor | PASS | Blackwing_Vayu_banishes_itself_and_a_Blackwing_to_summon_a_negated_Synchro: PASSED |
