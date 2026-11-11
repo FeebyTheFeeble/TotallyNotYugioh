@@ -46,6 +46,16 @@ namespace DuelPrototype
         public bool BanishWhenLeavingField { get; set; }
         public bool CannotBeTributedForTributeSummon { get; set; }
         public int CannotBeTributedForTributeSummonUntilTurn { get; set; }
+        public bool AncientFairySummonUsedThisTurn { get; set; }
+        public bool AncientFairyFieldEffectUsedThisTurn { get; set; }
+        public bool MajesticTargetEffectUsedThisTurn { get; set; }
+        public bool ShootingStarExcavationUsedThisTurn { get; set; }
+        public bool ShootingStarDestructionNegateUsedThisTurn { get; set; }
+        public bool ShootingStarAttackNegateUsedThisTurn { get; set; }
+        public bool WasSynchroSummoned { get; set; }
+        public int SilverwindProtectionTurn { get; set; }
+        public int ReturnAtEndPhaseTurn { get; set; }
+        public CardInstance CopiedEffectTarget { get; set; }
         public List<CardInstance> FusionMaterials { get; } = new List<CardInstance>();
         public CardInstance EquippedMonster { get; set; }
         public int CurrentAttack => Definition.Attack + AttackBonus + PermanentAttackBonus;
@@ -83,6 +93,7 @@ namespace DuelPrototype
         public int CannotChangePositionUntilTurn { get; set; }
         public int NoAttackTurnsRemaining { get; set; }
         public int PositionChangesLockedTurnsRemaining { get; set; }
+        public int BattlePhaseSkippedTurn { get; set; }
         public int DeckCount => Deck.Count;
 
         public DuelPlayer(string name, bool isAi)
@@ -95,6 +106,11 @@ namespace DuelPrototype
     public sealed class DuelEngine
     {
         public const int MinimumMainDeckSize = 40;
+        private const int AiPlannerDepth = 3;
+        private const int AiPlannerBeamWidth = 3;
+        private const int AiPlannerCandidatesPerNode = 18;
+        private const int AiPlannerEvaluationLimit = 126;
+        private const int AiPlannerActionsPerTurnLimit = 8;
 
         private enum ResponseAttempt { None, Cancelled, Waiting }
 
@@ -113,6 +129,7 @@ namespace DuelPrototype
         private readonly List<Action> pendingAiActions = new List<Action>();
         private int turnNumber;
         private int pendingAiActionIndex;
+        private int aiPlannerActionsThisTurn;
         private DuelPlayer pendingAiTurnActor;
         private CardEffect pendingResponseType;
         private Action pendingResponsePass;
@@ -131,6 +148,12 @@ namespace DuelPrototype
         private bool pendingDeckChoiceToGraveyard;
         private bool pendingDeckChoiceSanganRestriction;
         private bool pendingDeckChoiceSpecialSummon;
+        private bool pendingDeckChoiceOptional;
+        private CardInstance pendingPowerToolChoiceSource;
+        private List<CardInstance> pendingPowerToolChoices = new List<CardInstance>();
+        private DuelPlayer pendingQuickdrawOwner;
+        private CardInstance pendingQuickdrawSource;
+        private CardInstance pendingDustTornadoResponse;
         private DuelPlayer temporarilyDisabledCardOwner;
         private string temporarilyDisabledCardName;
         private int temporarilyDisabledCardTurn;
@@ -145,6 +168,7 @@ namespace DuelPrototype
         public event Action<CardInstance, CardInstance> AttackDeclared;
         public event Action<DuelPlayer, CardInstance> CardDrawn;
         public event Action<DuelPlayer, CardInstance, IReadOnlyList<CardInstance>> TributeSummoned;
+        public event Action<DuelPlayer, CardInstance> MonsterDestroyed;
         public bool CanAttackThisTurn => turnNumber > 1;
         public bool IsTrapActivationBlockedByJinzo(CardInstance card)
         {
@@ -160,6 +184,26 @@ namespace DuelPrototype
         public string Winner { get; private set; }
         public IReadOnlyList<string> Messages => messages;
         public bool SearchChoiceOpen => pendingDeckChoiceOwner != null;
+        public bool SearchChoiceOptional => SearchChoiceOpen && pendingDeckChoiceOptional;
+        public bool PowerToolChoiceOpen => pendingPowerToolChoiceSource != null;
+        public bool QuickdrawDiscardChoiceOpen => pendingQuickdrawSource != null;
+        public IReadOnlyList<CardInstance> AvailableQuickdrawDiscards => QuickdrawDiscardChoiceOpen
+            ? pendingQuickdrawOwner.Hand.Where(card => card != pendingQuickdrawSource &&
+                card.Definition.IsMonster).ToList()
+            : Array.Empty<CardInstance>();
+        public IReadOnlyList<CardInstance> AvailablePowerToolCards => PowerToolChoiceOpen
+            ? pendingPowerToolChoices
+            : Array.Empty<CardInstance>();
+        public bool DustTornadoTargetChoiceOpen => pendingDustTornadoResponse != null;
+        public CardInstance PendingDustTornado => pendingDustTornadoResponse;
+        public IReadOnlyList<CardInstance> AvailableDustTornadoTargets => DustTornadoTargetChoiceOpen
+            ? GetOpponent(Human).SpellTrapZones.Concat(new[] { GetOpponent(Human).FieldSpellZone })
+                .Where(card => card != null).ToList()
+            : Array.Empty<CardInstance>();
+        public IReadOnlyList<CardInstance> AvailableDustTornadoSetCards => DustTornadoTargetChoiceOpen
+            ? Human.Hand.Where(card => card.Definition.Kind == CardKind.Spell ||
+                card.Definition.Kind == CardKind.Trap).ToList()
+            : Array.Empty<CardInstance>();
         public string SearchChoicePrompt => SearchChoiceOpen
             ? pendingDeckChoicePrompt
             : "";
@@ -184,11 +228,11 @@ namespace DuelPrototype
                     return "Discard a card for " + responseDiscardReason + ".";
                 string source = string.IsNullOrEmpty(pendingResponseSource) ? "The opponent's card" : pendingResponseSource;
                 return pendingResponseType == CardEffect.StopAttack
-                    ? source + " declared an attack. Activate a Set Trap or pass."
+                    ? source + " declared an attack. Activate a Set Trap or a Quick Effect, or pass."
                     : pendingResponseType == CardEffect.CounterSpell
-                        ? source + " activated a Spell. Activate a Counter Trap or pass."
+                        ? source + " activated a Spell. Activate a response or pass."
                         : pendingResponseType == CardEffect.CounterMonsterEffect
-                            ? source + " activated a monster effect. Activate a Counter Trap or pass."
+                            ? source + " activated a monster effect. Activate a response or pass."
                             : pendingResponseType == CardEffect.DestroyAllMonsters
                                 ? source + " was Summoned. Activate a Trap or pass."
                             : source + " activated a Trap. Chain a Counter Trap or pass.";
@@ -196,7 +240,7 @@ namespace DuelPrototype
         }
         public IReadOnlyList<CardInstance> AvailableResponseTraps => ResponseDiscardChoiceOpen
             ? Human.Hand.Where(card => card != responseEffectAwaitingDiscard).ToList()
-            : GetResponseCards(Human, pendingResponseType);
+            : GetResponseCards(Human, pendingResponseType, pendingResponseSourceCard);
         public bool IsHumanActionWindow => !IsAiVsAi && CurrentPlayer == Human && Phase != DuelPhase.GameOver;
         public string PhaseLabel
         {
@@ -269,11 +313,17 @@ namespace DuelPrototype
             return CaptureState(false);
         }
 
+        public DuelStateSnapshot CaptureStateForReplay()
+        {
+            return CaptureState(true);
+        }
+
         private DuelStateSnapshot CaptureState(bool allowPendingAiActions)
         {
             if (Human == null || Opponent == null || CurrentPlayer == null)
                 throw new InvalidOperationException("Start a duel before capturing its state.");
             if (ResponseWindowOpen || ResponseDiscardChoiceOpen || SearchChoiceOpen ||
+                QuickdrawDiscardChoiceOpen ||
                 (!allowPendingAiActions && pendingAiActions.Count > 0))
                 throw new InvalidOperationException(
                     "Duel state can only be captured when no response, search, or AI action is pending.");
@@ -337,10 +387,20 @@ namespace DuelPrototype
                     banishWhenLeavingField = card.BanishWhenLeavingField,
                     cannotBeTributedForTributeSummon = card.CannotBeTributedForTributeSummon,
                     cannotBeTributedForTributeSummonUntilTurn = card.CannotBeTributedForTributeSummonUntilTurn,
+                    ancientFairySummonUsedThisTurn = card.AncientFairySummonUsedThisTurn,
+                    ancientFairyFieldEffectUsedThisTurn = card.AncientFairyFieldEffectUsedThisTurn,
+                    majesticTargetEffectUsedThisTurn = card.MajesticTargetEffectUsedThisTurn,
+                    shootingStarExcavationUsedThisTurn = card.ShootingStarExcavationUsedThisTurn,
+                    shootingStarDestructionNegateUsedThisTurn = card.ShootingStarDestructionNegateUsedThisTurn,
+                    shootingStarAttackNegateUsedThisTurn = card.ShootingStarAttackNegateUsedThisTurn,
+                    wasSynchroSummoned = card.WasSynchroSummoned,
+                    silverwindProtectionTurn = card.SilverwindProtectionTurn,
+                    returnAtEndPhaseTurn = card.ReturnAtEndPhaseTurn,
                     fusionMaterialIds = card.FusionMaterials.Select(material => GetInstanceId(material, instanceIds)).ToArray(),
                     equippedMonsterId = card.EquippedMonster == null
                         ? null
-                        : GetInstanceId(card.EquippedMonster, instanceIds)
+                        : GetInstanceId(card.EquippedMonster, instanceIds),
+                    copiedEffectTargetId = GetInstanceId(card.CopiedEffectTarget, instanceIds)
                 };
             }
 
@@ -388,7 +448,16 @@ namespace DuelPrototype
                         EffectDurationTurnsRemaining = item.effectDurationTurnsRemaining,
                         BanishWhenLeavingField = item.banishWhenLeavingField,
                         CannotBeTributedForTributeSummon = item.cannotBeTributedForTributeSummon,
-                        CannotBeTributedForTributeSummonUntilTurn = item.cannotBeTributedForTributeSummonUntilTurn
+                        CannotBeTributedForTributeSummonUntilTurn = item.cannotBeTributedForTributeSummonUntilTurn,
+                        AncientFairySummonUsedThisTurn = item.ancientFairySummonUsedThisTurn,
+                        AncientFairyFieldEffectUsedThisTurn = item.ancientFairyFieldEffectUsedThisTurn,
+                        MajesticTargetEffectUsedThisTurn = item.majesticTargetEffectUsedThisTurn,
+                        ShootingStarExcavationUsedThisTurn = item.shootingStarExcavationUsedThisTurn,
+                        ShootingStarDestructionNegateUsedThisTurn = item.shootingStarDestructionNegateUsedThisTurn,
+                        ShootingStarAttackNegateUsedThisTurn = item.shootingStarAttackNegateUsedThisTurn,
+                        WasSynchroSummoned = item.wasSynchroSummoned,
+                        SilverwindProtectionTurn = item.silverwindProtectionTurn,
+                        ReturnAtEndPhaseTurn = item.returnAtEndPhaseTurn
                     };
                     return card;
                 },
@@ -402,6 +471,7 @@ namespace DuelPrototype
                     card.FusionMaterials.Add(cards[materialId]);
                 if (!string.IsNullOrEmpty(cardState.equippedMonsterId))
                     card.EquippedMonster = cards[cardState.equippedMonsterId];
+                card.CopiedEffectTarget = GetCard(cards, cardState.copiedEffectTargetId);
             }
 
             DuelEngine engine = new DuelEngine
@@ -474,7 +544,8 @@ namespace DuelPrototype
                 cannotAttackUntilTurn = player.CannotAttackUntilTurn,
                 cannotChangePositionUntilTurn = player.CannotChangePositionUntilTurn,
                 noAttackTurnsRemaining = player.NoAttackTurnsRemaining,
-                positionChangesLockedTurnsRemaining = player.PositionChangesLockedTurnsRemaining
+                positionChangesLockedTurnsRemaining = player.PositionChangesLockedTurnsRemaining,
+                battlePhaseSkippedTurn = player.BattlePhaseSkippedTurn
             };
         }
 
@@ -497,6 +568,7 @@ namespace DuelPrototype
                 CannotChangePositionUntilTurn = snapshot.cannotChangePositionUntilTurn,
                 NoAttackTurnsRemaining = snapshot.noAttackTurnsRemaining,
                 PositionChangesLockedTurnsRemaining = snapshot.positionChangesLockedTurnsRemaining,
+                BattlePhaseSkippedTurn = snapshot.battlePhaseSkippedTurn,
                 FieldSpellZone = GetCard(cards, snapshot.fieldSpellZone)
             };
             player.Deck.AddRange(snapshot.deck.Select(id => cards[id]));
@@ -619,6 +691,37 @@ namespace DuelPrototype
                 OpenResponseWindow(GetOpponent(CurrentPlayer), CardEffect.DestroyAllMonsters, card,
                     () => { }, DestroyAllMonstersOnField);
             }
+            return true;
+        }
+
+        public bool TryChooseQuickdrawDiscard(CardInstance card)
+        {
+            if (!QuickdrawDiscardChoiceOpen || card == null ||
+                !pendingQuickdrawOwner.Hand.Contains(card) ||
+                card == pendingQuickdrawSource || !card.Definition.IsMonster)
+                return Reject("Choose another Monster Card in your hand to discard for Quickdraw Synchron.");
+
+            DuelPlayer owner = pendingQuickdrawOwner;
+            CardInstance source = pendingQuickdrawSource;
+            int zone = FindEmptyMonsterZone(owner);
+            if (owner != CurrentPlayer || !owner.Hand.Contains(source) || zone < 0 ||
+                owner.SummonsLockedThisTurn)
+                return Reject("Quickdraw Synchron can no longer be Special Summoned.");
+
+            pendingQuickdrawOwner = null;
+            pendingQuickdrawSource = null;
+            owner.Hand.Remove(card);
+            SendCardToGraveyard(owner, card);
+            PlaceSpecialSummon(owner, source, zone, true);
+            return true;
+        }
+
+        public bool CancelQuickdrawDiscardChoice()
+        {
+            if (!QuickdrawDiscardChoiceOpen)
+                return Reject("Quickdraw Synchron is not waiting for a discard choice.");
+            pendingQuickdrawOwner = null;
+            pendingQuickdrawSource = null;
             return true;
         }
 
@@ -858,32 +961,14 @@ namespace DuelPrototype
                             synchron.EffectsNegated = true;
                     }
                     break;
-                case CardEffect.FormulaSynchronDraw:
-                    DrawCards(owner, 1);
-                    break;
-                case CardEffect.AncientFairyDragon:
-                    DrawCards(owner, 1);
-                    break;
                 case CardEffect.JunkWarriorBoost:
                     summoned.AttackBonus += owner.MonsterZones
                         .Where(item => item != null && item != summoned && item.Definition.Level <= 2)
                         .Sum(item => item.CurrentAttack);
                     break;
-                case CardEffect.LifeStreamSetLifePoints:
-                    owner.LifePoints = 4000;
-                    break;
                 case CardEffect.BlackRoseDragon:
                     foreach (CardInstance fieldCard in GetAllFieldCards())
                         DestroyFieldCard(fieldCard);
-                    CheckWinner();
-                    break;
-                case CardEffect.BlackwingSilverwind:
-                    foreach (CardInstance monster in Human.MonsterZones.Concat(Opponent.MonsterZones)
-                                 .Where(item => item != null && item != summoned && item.FaceUp &&
-                                                item.Definition.Defense < summoned.CurrentAttack)
-                                 .Take(2).ToList())
-                        DestroyFieldCard(monster);
-                    owner.NoAttackTurnsRemaining = Math.Max(owner.NoAttackTurnsRemaining, 1);
                     CheckWinner();
                     break;
             }
@@ -947,7 +1032,116 @@ namespace DuelPrototype
                 card.Definition.DisplayName == "Valkyrion the Magna Warrior");
         }
 
-        public bool TryActivate(CardInstance card, CardInstance target = null)
+        public bool TryActivateAncientFairyDragonSummon(CardInstance source, CardInstance monster)
+        {
+            if (!CanActInMainPhase())
+                return Reject("Ancient Fairy Dragon's Special Summon effect is available during your Main Phase.");
+            if (source == null || !CurrentPlayer.MonsterZones.Contains(source) || !source.FaceUp ||
+                source.Definition.Effect != CardEffect.AncientFairyDragon ||
+                source.AncientFairySummonUsedThisTurn)
+                return Reject("Ancient Fairy Dragon's Special Summon effect is unavailable.");
+            if (monster == null || !CurrentPlayer.Hand.Contains(monster) ||
+                !monster.Definition.IsMonster || monster.Definition.Level > 4)
+                return Reject("Select a Level 4 or lower monster in your hand.");
+            if (FindEmptyMonsterZone(CurrentPlayer) < 0 || CurrentPlayer.SummonsLockedThisTurn)
+                return Reject("You need an open Monster Zone and permission to Special Summon.");
+
+            source.AncientFairySummonUsedThisTurn = true;
+            CurrentPlayer.BattlePhaseSkippedTurn = turnNumber;
+            PlaceSpecialSummon(CurrentPlayer, monster, FindEmptyMonsterZone(CurrentPlayer), true);
+            Log(CurrentPlayer.Name + " skipped the Battle Phase because of Ancient Fairy Dragon.");
+            return true;
+        }
+
+        public bool TryActivateAncientFairyDragonFieldEffect(CardInstance source)
+        {
+            if (!CanActInMainPhase())
+                return Reject("Ancient Fairy Dragon's Field Spell effect is available during your Main Phase.");
+            if (source == null || !CurrentPlayer.MonsterZones.Contains(source) || !source.FaceUp ||
+                source.Definition.Effect != CardEffect.AncientFairyDragon ||
+                source.AncientFairyFieldEffectUsedThisTurn)
+                return Reject("Ancient Fairy Dragon's Field Spell effect is unavailable.");
+
+            List<CardInstance> fieldSpells = new[] { Human.FieldSpellZone, Opponent.FieldSpellZone }
+                .Where(card => card != null && card.Definition.Subtype == CardSubtype.Field).ToList();
+            if (fieldSpells.Count == 0)
+                return Reject("There are no Field Spells in the Field Zones to destroy.");
+
+            source.AncientFairyFieldEffectUsedThisTurn = true;
+            string[] destroyedNames = fieldSpells.Select(card => card.Definition.DisplayName).ToArray();
+            foreach (CardInstance fieldSpell in fieldSpells)
+                DestroyFieldCard(fieldSpell);
+            CurrentPlayer.LifePoints += 1000;
+            Log(CurrentPlayer.Name + " gained 1000 LP with Ancient Fairy Dragon.");
+
+            if (!CurrentPlayer.Deck.Any(candidate =>
+                    candidate.Definition.Subtype == CardSubtype.Field &&
+                    !destroyedNames.Contains(candidate.Definition.DisplayName)))
+                return true;
+            return BeginDeckChoice(CurrentPlayer, source,
+                candidate => candidate.Definition.Subtype == CardSubtype.Field &&
+                             !destroyedNames.Contains(candidate.Definition.DisplayName),
+                false, "You may add a differently named Field Spell from your Deck to your hand.",
+                optional: true);
+        }
+
+        public bool TryActivateBlackwingSilverwind(CardInstance source, IReadOnlyList<CardInstance> targets)
+        {
+            if (!CanActInMainPhase())
+                return Reject("Silverwind's Synchro effect is available during your Main Phase.");
+            if (source == null || !CurrentPlayer.MonsterZones.Contains(source) || !source.FaceUp ||
+                source.Definition.Effect != CardEffect.BlackwingSilverwind ||
+                source.SummonedTurnNumber != turnNumber || !source.WasSynchroSummoned ||
+                source.EffectUsedThisTurn)
+                return Reject("Silverwind's Synchro effect is unavailable.");
+            List<CardInstance> chosen = targets == null
+                ? new List<CardInstance>()
+                : targets.Distinct().ToList();
+            if (chosen.Count > 2 || chosen.Any(card =>
+                    (GetMonsterOwner(card) == null) || !card.FaceUp ||
+                    card.Definition.Defense >= source.CurrentAttack))
+                return Reject("Choose up to two face-up monsters with DEF lower than Silverwind's ATK.");
+
+            source.EffectUsedThisTurn = true;
+            foreach (CardInstance monster in chosen)
+                DestroyMonsterByCardEffect(GetMonsterOwner(monster), monster);
+            CurrentPlayer.BattlePhaseSkippedTurn = turnNumber;
+            CheckWinner();
+            return true;
+        }
+
+        public bool TryActivateDustTornado(
+            CardInstance source, CardInstance target, CardInstance cardToSet = null)
+        {
+            if (source == null || source.Definition.Effect != CardEffect.DustTornado)
+                return Reject("Select Dust Tornado.");
+            return TryActivate(source, target, cardToSet);
+        }
+
+        public bool TryActivateCopiedMonsterEffect(
+            CardInstance majesticStarDragon, CardInstance effectTarget = null)
+        {
+            if (!CanActInMainPhase())
+                return Reject("Majestic Star Dragon's copied effect is available during your Main Phase.");
+            if (majesticStarDragon == null || !CurrentPlayer.MonsterZones.Contains(majesticStarDragon) ||
+                !majesticStarDragon.FaceUp ||
+                majesticStarDragon.Definition.Effect != CardEffect.MajesticStarDragon ||
+                majesticStarDragon.CopiedEffectTarget == null ||
+                majesticStarDragon.EffectUsedThisTurn)
+                return Reject("Majestic Star Dragon has no unused copied monster effect.");
+
+            CardDefinition copiedDefinition = majesticStarDragon.CopiedEffectTarget.Definition;
+            if (copiedDefinition.Effect == CardEffect.None)
+                return Reject("The targeted monster has no implemented activated effect to copy.");
+            if (!ApplyEffect(CurrentPlayer, copiedDefinition, effectTarget, majesticStarDragon))
+                return false;
+            majesticStarDragon.EffectUsedThisTurn = true;
+            majesticStarDragon.CopiedEffectTarget = null;
+            Log(CurrentPlayer.Name + " activated the copied " + copiedDefinition.DisplayName + " effect with Majestic Star Dragon.");
+            return true;
+        }
+
+        public bool TryActivate(CardInstance card, CardInstance target = null, CardInstance optionalCard = null)
         {
             if (card == null)
                 return Reject("Select a card to activate.");
@@ -979,8 +1173,16 @@ namespace DuelPrototype
             {
                 return Reject("Select a Spell, an activatable monster, or a Set Trap.");
             }
-            if (monsterEffect && card.EffectUsedThisTurn)
+            bool separateOncePerTurnEffect = card.Definition.Effect == CardEffect.MajesticStarDragon ||
+                card.Definition.Effect == CardEffect.ShootingStarDragon;
+            if (monsterEffect && card.EffectUsedThisTurn && !separateOncePerTurnEffect)
                 return Reject("That monster's effect has already been used this turn.");
+            if (monsterEffect && card.Definition.Effect == CardEffect.MajesticStarDragon &&
+                card.MajesticTargetEffectUsedThisTurn)
+                return Reject("Majestic Star Dragon has already negated a monster this turn.");
+            if (monsterEffect && card.Definition.Effect == CardEffect.ShootingStarDragon &&
+                card.ShootingStarExcavationUsedThisTurn)
+                return Reject("Shooting Star Dragon's excavation effect has already been used this turn.");
             if (monsterEffect && card.EffectsNegated)
                 return Reject("That monster's effects are negated.");
             if (fromSetTrap && IsTrapActivationBlockedByJinzo(card))
@@ -1102,10 +1304,16 @@ namespace DuelPrototype
                     .Any(item => item != null && IsBlackwing(item.Definition))))
                 return Reject("Black Whirlwind needs a Blackwing monster on your field.");
             if (card.Definition.Effect == CardEffect.DestroySpellTrap &&
-                (target == null || !IsOnSpellTrapField(target) ||
-                 (card.Definition.CardId == "60082869" &&
-                  GetSpellTrapOwner(target) != GetOpponent(CurrentPlayer))))
+                (target == null || !IsOnSpellTrapField(target)))
                 return Reject("Select a Spell or Trap on the field to destroy.");
+            if (card.Definition.Effect == CardEffect.DustTornado &&
+                (target == null || GetSpellTrapOwner(target) != GetOpponent(CurrentPlayer)))
+                return Reject("Dust Tornado must target a Spell or Trap your opponent controls.");
+            if (card.Definition.Effect == CardEffect.DustTornado && optionalCard != null &&
+                (!CurrentPlayer.Hand.Contains(optionalCard) ||
+                 (optionalCard.Definition.Kind != CardKind.Spell &&
+                  optionalCard.Definition.Kind != CardKind.Trap)))
+                return Reject("Only a Spell or Trap in your hand can be Set by Dust Tornado.");
             if (card.Definition.Effect == CardEffect.ReviveWeakest &&
                 (FindEmptyMonsterZone(CurrentPlayer) < 0 ||
                  !CurrentPlayer.Graveyard.Any(monster => monster.Definition.IsMonster)))
@@ -1155,7 +1363,8 @@ namespace DuelPrototype
                 return Reject("Your Spell & Trap Zones are full.");
 
             CardEffect counterType = handSpell ? CardEffect.CounterSpell :
-                monsterEffect ? CardEffect.CounterMonsterEffect : CardEffect.None;
+                monsterEffect ? CardEffect.CounterMonsterEffect :
+                fromSetTrap ? CardEffect.CounterTrap : CardEffect.None;
             if (counterType != CardEffect.None)
             {
                 DuelPlayer owner = CurrentPlayer;
@@ -1165,7 +1374,8 @@ namespace DuelPrototype
                     Log(card.Definition.DisplayName + "'s effect was negated.");
                 };
                 ResponseAttempt response = OpenResponseWindow(GetOpponent(owner), counterType,
-                    card, () => ResolveActivatedEffect(owner, card, target, handSpell, monsterEffect, fromSetTrap), cancelActivation);
+                    card, () => ResolveActivatedEffect(owner, card, target, handSpell, monsterEffect,
+                        fromSetTrap, optionalCard), cancelActivation);
                 if (response == ResponseAttempt.Waiting)
                     return true;
                 if (response == ResponseAttempt.Cancelled)
@@ -1175,12 +1385,13 @@ namespace DuelPrototype
                 }
             }
 
-            return ResolveActivatedEffect(CurrentPlayer, card, target, handSpell, monsterEffect, fromSetTrap);
+            return ResolveActivatedEffect(CurrentPlayer, card, target, handSpell, monsterEffect,
+                fromSetTrap, optionalCard);
         }
 
         private bool ResolveActivatedEffect(
             DuelPlayer owner, CardInstance card, CardInstance target, bool handSpell, bool monsterEffect,
-            bool fromSetTrap = false)
+            bool fromSetTrap = false, CardInstance optionalCard = null)
         {
             if (handSpell && card.Definition.Subtype == CardSubtype.Equip &&
                 card.Definition.Effect == CardEffect.BoostStrongest)
@@ -1201,7 +1412,10 @@ namespace DuelPrototype
                     card.Definition.Subtype == CardSubtype.Field &&
                     card.Definition.Effect == CardEffect.BoostStrongest &&
                     !owner.MonsterZones.Any(monster => monster != null);
-                if (!fieldBoostWaitingForMonster && !ApplyEffect(owner, card.Definition, target, card))
+                bool effectApplied = card.Definition.Effect == CardEffect.DustTornado
+                    ? ResolveDustTornado(owner, card, target, optionalCard)
+                    : ApplyEffect(owner, card.Definition, target, card);
+                if (!fieldBoostWaitingForMonster && !effectApplied)
                     return false;
                 if (fromSetTrap && card.Definition.Effect == CardEffect.CallOfTheHaunted)
                 {
@@ -1219,7 +1433,8 @@ namespace DuelPrototype
                 owner.Hand.Remove(card);
                 owner.Graveyard.Add(card);
             }
-            if (monsterEffect)
+            if (monsterEffect && card.Definition.Effect != CardEffect.MajesticStarDragon &&
+                card.Definition.Effect != CardEffect.ShootingStarDragon)
                 card.EffectUsedThisTurn = true;
             if (handSpell)
                 NotifySpellActivated(owner);
@@ -1259,7 +1474,8 @@ namespace DuelPrototype
                 RemoveFromSpellTrapZones(owner, card);
                 owner.Graveyard.Add(card);
             }
-            if (monsterEffect)
+            if (monsterEffect && card.Definition.Effect != CardEffect.MajesticStarDragon &&
+                card.Definition.Effect != CardEffect.ShootingStarDragon)
                 card.EffectUsedThisTurn = true;
         }
 
@@ -1267,38 +1483,163 @@ namespace DuelPrototype
         {
             if (!CanActInMainPhase())
                 return Reject("Synchro Summons are only available during your Main Phase.");
-            if (CurrentPlayer.SummonsLockedThisTurn)
+            return ResolveSynchroSummon(CurrentPlayer, synchro, materials);
+        }
+
+        public bool TryQuickSynchroSummon(
+            CardInstance formulaSynchron, CardDefinition synchro, IReadOnlyList<CardInstance> materials)
+        {
+            DuelPlayer owner = GetMonsterOwner(formulaSynchron);
+            if (owner == null || owner == CurrentPlayer || Phase != DuelPhase.MainOne &&
+                Phase != DuelPhase.MainTwo)
+                return Reject("Formula Synchron's Quick Effect is available during the opponent's Main Phase.");
+            if (!formulaSynchron.FaceUp || formulaSynchron.Definition.Effect != CardEffect.FormulaSynchronDraw ||
+                materials == null || !materials.Contains(formulaSynchron))
+                return Reject("Include your face-up Formula Synchron as Synchro Material.");
+            if (synchro == null || !owner.ExtraDeck.Any(card => card.Definition == synchro))
+                return Reject("Select a Synchro Monster from your Extra Deck.");
+            return ResolveSynchroSummon(owner, synchro, materials);
+        }
+
+        public bool TryRespondWithFormulaSynchron(
+            CardInstance formulaSynchron, CardDefinition synchro, IReadOnlyList<CardInstance> materials)
+        {
+            if (!ResponseWindowOpen ||
+                !GetResponseCards(Human, pendingResponseType, pendingResponseSourceCard).Contains(formulaSynchron))
+                return Reject("Formula Synchron cannot respond to the current chain.");
+            Action resolvePending = pendingResponsePass;
+            if (!TryQuickSynchroSummon(formulaSynchron, synchro, materials))
+                return false;
+            ClearResponseWindow();
+            if (resolvePending != null)
+                resolvePending();
+            return true;
+        }
+
+        private CardDefinition FindQuickSynchro(
+            DuelPlayer owner, CardInstance formulaSynchron, out List<CardInstance> materials)
+        {
+            materials = null;
+            if (owner == null || formulaSynchron == null || !owner.MonsterZones.Contains(formulaSynchron))
+                return null;
+            List<CardInstance> field = owner.MonsterZones
+                .Where(card => card != null && card.FaceUp).ToList();
+            foreach (CardInstance extra in owner.ExtraDeck
+                         .Where(card => card.Definition.Kind == CardKind.Synchro)
+                         .OrderByDescending(card => card.Definition.Attack))
+            {
+                for (int mask = 1; mask < (1 << field.Count); mask++)
+                {
+                    List<CardInstance> chosen = new List<CardInstance>();
+                    for (int bit = 0; bit < field.Count; bit++)
+                    {
+                        if ((mask & (1 << bit)) != 0)
+                            chosen.Add(field[bit]);
+                    }
+                    if (chosen.Contains(formulaSynchron) &&
+                        IsValidSynchroMaterial(extra.Definition, chosen, owner))
+                    {
+                        materials = chosen;
+                        return extra.Definition;
+                    }
+                }
+            }
+            return null;
+        }
+
+        private bool ResolveMajesticStarNegate(DuelPlayer owner, CardInstance majestic)
+        {
+            Action negate = pendingResponseTrap;
+            CardInstance source = pendingResponseSourceCard;
+            ClearResponseWindow();
+            RemoveFromMonsterZones(owner, majestic);
+            owner.Graveyard.Add(majestic);
+            if (negate != null)
+                negate();
+            foreach (CardInstance fieldCard in GetAllFieldCards()
+                         .Where(card => GetCardController(card) == GetOpponent(owner)).ToList())
+                DestroyFieldCard(fieldCard);
+            CheckWinner();
+            Log("Majestic Star Dragon negated the activation and destroyed all cards its opponent controlled.");
+            return true;
+        }
+
+        private bool ResolveShootingStarDestructionNegate(DuelPlayer owner, CardInstance shootingStar)
+        {
+            if (!IsDestructionEffect(pendingResponseSourceCard) ||
+                shootingStar.ShootingStarDestructionNegateUsedThisTurn)
+                return Reject("Shooting Star Dragon can only negate a destruction effect once per turn.");
+            Action negate = pendingResponseTrap;
+            CardInstance source = pendingResponseSourceCard;
+            ClearResponseWindow();
+            shootingStar.ShootingStarDestructionNegateUsedThisTurn = true;
+            shootingStar.EffectUsedThisTurn = true;
+            if (negate != null)
+                negate();
+            DuelPlayer sourceOwner = GetCardController(source);
+            if (sourceOwner != null)
+                DestroyFieldCard(source);
+            CheckWinner();
+            Log("Shooting Star Dragon negated and destroyed " + source.Definition.DisplayName + "'s effect.");
+            return true;
+        }
+
+        private bool ResolveShootingStarAttackNegate(DuelPlayer owner, CardInstance shootingStar)
+        {
+            if (shootingStar.ShootingStarAttackNegateUsedThisTurn)
+                return Reject("Shooting Star Dragon's attack-negation effect has already been used this turn.");
+            ClearResponseWindow();
+            RemoveFromMonsterZones(owner, shootingStar);
+            owner.Banished.Add(shootingStar);
+            shootingStar.ShootingStarAttackNegateUsedThisTurn = true;
+            shootingStar.ReturnAtEndPhaseTurn = turnNumber;
+            Log("Shooting Star Dragon banished itself to negate the attack.");
+            return true;
+        }
+
+        private bool ResolveSynchroSummon(
+            DuelPlayer owner, CardDefinition synchro, IReadOnlyList<CardInstance> materials)
+        {
+            if (owner.SummonsLockedThisTurn)
                 return Reject("A card effect prevents you from Special Summoning this turn.");
             if (synchro == null || synchro.Kind != CardKind.Synchro ||
-                !CurrentPlayer.ExtraDeck.Any(card => card.Definition == synchro))
+                !owner.ExtraDeck.Any(card => card.Definition == synchro))
                 return Reject("Select a Synchro Monster from your Extra Deck.");
-            List<CardInstance> chosen = materials == null ? new List<CardInstance>() : materials.Distinct().ToList();
-            if (!IsValidSynchroMaterial(synchro, chosen, CurrentPlayer))
+            List<CardInstance> chosen = materials == null
+                ? new List<CardInstance>()
+                : materials.Distinct().ToList();
+            if (!IsValidSynchroMaterial(synchro, chosen, owner))
                 return Reject("Choose face-up monsters with one Tuner and an exact total Level of " + synchro.Level + ".");
 
             foreach (CardInstance material in chosen)
-                SendMonsterToGraveyardDeferred(CurrentPlayer, material);
-            int zone = FindEmptyMonsterZone(CurrentPlayer);
+                SendMonsterToGraveyardDeferred(owner, material);
+            int zone = FindEmptyMonsterZone(owner);
             CardInstance summoned = new CardInstance(synchro) { SummonedTurnNumber = turnNumber };
-            CurrentPlayer.MonsterZones[zone] = summoned;
-            Log(CurrentPlayer.Name + " Synchro Summoned " + synchro.DisplayName + "!");
-            ResolveSummonTriggers(CurrentPlayer, summoned, false);
+            summoned.WasSynchroSummoned = true;
+            owner.MonsterZones[zone] = summoned;
+            Log(owner.Name + " Synchro Summoned " + synchro.DisplayName + "!");
+            ResolveSummonTriggers(owner, summoned, false);
             ResolveSynchroSummonTriggers();
+            if (synchro.Effect == CardEffect.FormulaSynchronDraw)
+                DrawCards(owner, 1);
+            if (synchro.Effect == CardEffect.LifeStreamSetLifePoints)
+                owner.LifePoints = 4000;
             if (synchro.Effect == CardEffect.StardustDragon)
             {
-                CardInstance xiaolong = CurrentPlayer.Graveyard.FirstOrDefault(item =>
+                CardInstance xiaolong = owner.Graveyard.FirstOrDefault(item =>
                     item.Definition.Effect == CardEffect.StardustXiaolong);
                 if (xiaolong != null)
-                    SpecialSummonFromGraveyard(CurrentPlayer, xiaolong, true);
+                    SpecialSummonFromGraveyard(owner, xiaolong, true);
             }
-            ResolveSynchroMaterialEffects(CurrentPlayer, chosen, summoned);
+            ResolveSynchroMaterialEffects(owner, chosen, summoned);
             ResolveDeferredGraveyardEffects();
             return true;
         }
 
         public bool TryAttack(CardInstance attacker, CardInstance target)
         {
-            if (SearchChoiceOpen || (!IsAiVsAi && CurrentPlayer != Human) || Phase != DuelPhase.Battle)
+            if (SearchChoiceOpen || PowerToolChoiceOpen || QuickdrawDiscardChoiceOpen ||
+                (!IsAiVsAi && CurrentPlayer != Human) || Phase != DuelPhase.Battle)
                 return Reject("Attacks are only available during your Battle Phase.");
             return ResolveAttack(CurrentPlayer, attacker, target);
         }
@@ -1314,6 +1655,38 @@ namespace DuelPrototype
             CompleteDeckChoice(owner, card, pendingDeckChoiceToGraveyard,
                 pendingDeckChoiceSanganRestriction, pendingDeckChoiceSpecialSummon);
             ClearDeckChoice();
+            return true;
+        }
+
+        public bool TrySkipSearchChoice()
+        {
+            if (!SearchChoiceOpen || !pendingDeckChoiceOptional)
+                return Reject("This effect requires you to choose a card from the Deck.");
+            ClearDeckChoice();
+            return true;
+        }
+
+        public bool TryChoosePowerToolCards(IReadOnlyList<CardInstance> cards)
+        {
+            if (!PowerToolChoiceOpen || cards == null || cards.Count != 3 ||
+                cards.Distinct().Count() != 3 ||
+                cards.Any(card => !pendingPowerToolChoices.Contains(card) ||
+                    card.Definition.Kind != CardKind.Spell ||
+                    card.Definition.Subtype != CardSubtype.Equip))
+                return Reject("Reveal exactly three Equip Spell Cards from your Deck.");
+
+            DuelPlayer owner = GetMonsterOwner(pendingPowerToolChoiceSource);
+            if (owner == null || pendingPowerToolChoices.Any(card => !owner.Deck.Contains(card)))
+                return Reject("Power Tool Dragon's Deck choices are no longer available.");
+            CardInstance selected = cards[random.Next(cards.Count)];
+            foreach (CardInstance equip in cards)
+                owner.Deck.Remove(equip);
+            owner.Hand.Add(selected);
+            owner.Deck.AddRange(cards.Where(card => card != selected));
+            Shuffle(owner.Deck);
+            pendingPowerToolChoiceSource = null;
+            pendingPowerToolChoices.Clear();
+            Log(owner.Name + " randomly added an Equip Spell revealed by Power Tool Dragon.");
             return true;
         }
 
@@ -1349,6 +1722,36 @@ namespace DuelPrototype
                     Log("Attack the Moon! destroyed " + backrow.Definition.DisplayName + ".");
                 }
             }
+
+            return true;
+        }
+
+        private bool ResolveDustTornado(
+            DuelPlayer owner, CardInstance source, CardInstance target, CardInstance cardToSet)
+        {
+            DuelPlayer targetOwner = GetSpellTrapOwner(target);
+            if (targetOwner == null || targetOwner == owner)
+                return Reject("Dust Tornado must target a Spell or Trap your opponent controls.");
+
+            if (targetOwner.FieldSpellZone == target)
+                targetOwner.FieldSpellZone = null;
+            else
+                RemoveFromSpellTrapZones(targetOwner, target);
+            targetOwner.Graveyard.Add(target);
+            Log(target.Definition.DisplayName + " was destroyed by Dust Tornado.");
+
+            if (cardToSet == null)
+                return true;
+            if (!owner.Hand.Contains(cardToSet) ||
+                (cardToSet.Definition.Kind != CardKind.Spell && cardToSet.Definition.Kind != CardKind.Trap))
+                return Reject("Only a Spell or Trap in your hand can be Set by Dust Tornado.");
+            int zone = FindEmptySpellTrapZone(owner);
+            if (zone < 0)
+                return true;
+            owner.Hand.Remove(cardToSet);
+            cardToSet.FaceUp = false;
+            owner.SpellTrapZones[zone] = cardToSet;
+            Log(owner.Name + " Set " + cardToSet.Definition.DisplayName + " with Dust Tornado.");
             return true;
         }
 
@@ -1385,14 +1788,16 @@ namespace DuelPrototype
 
         public void AdvancePhase()
         {
-            if (!IsHumanActionWindow || ResponseWindowOpen || SearchChoiceOpen)
+            if (!IsHumanActionWindow || ResponseWindowOpen || SearchChoiceOpen || PowerToolChoiceOpen ||
+                QuickdrawDiscardChoiceOpen)
                 return;
             AdvanceToNextPhase();
         }
 
         public bool EndHumanTurn()
         {
-            if (!IsHumanActionWindow || ResponseWindowOpen || SearchChoiceOpen)
+            if (!IsHumanActionWindow || ResponseWindowOpen || SearchChoiceOpen || PowerToolChoiceOpen ||
+                QuickdrawDiscardChoiceOpen)
                 return false;
 
             if (Phase != DuelPhase.End && !AdvanceToPhase(DuelPhase.End))
@@ -1405,6 +1810,8 @@ namespace DuelPrototype
         public bool AdvanceToPhase(DuelPhase target)
         {
             if (!IsHumanActionWindow || ResponseWindowOpen || target == DuelPhase.GameOver)
+                return false;
+            if (target == DuelPhase.Battle && CurrentPlayer.BattlePhaseSkippedTurn == turnNumber)
                 return false;
             if (Phase == target)
             {
@@ -1440,8 +1847,16 @@ namespace DuelPrototype
                     Log("Main Phase 1. Choose an action.");
                     break;
                 case DuelPhase.MainOne:
-                    SetPhase(DuelPhase.Battle);
-                    Log("Battle Phase. Select one of your monsters, then a target (or Direct Attack).");
+                    if (CurrentPlayer.BattlePhaseSkippedTurn == turnNumber)
+                    {
+                        SetPhase(DuelPhase.MainTwo);
+                        Log("Battle Phase skipped. Main Phase 2.");
+                    }
+                    else
+                    {
+                        SetPhase(DuelPhase.Battle);
+                        Log("Battle Phase. Select one of your monsters, then a target (or Direct Attack).");
+                    }
                     break;
                 case DuelPhase.Battle:
                     SetPhase(DuelPhase.MainTwo);
@@ -1512,8 +1927,29 @@ namespace DuelPrototype
                 return TryRespondWithTrap(response);
             }
 
-            if (!GetResponseCards(Human, pendingResponseType).Contains(trap))
+            if (!GetResponseCards(Human, pendingResponseType, pendingResponseSourceCard).Contains(trap))
                 return Reject("That card cannot respond to the current event.");
+            if (trap.Definition.Effect == CardEffect.DustTornado)
+            {
+                pendingDustTornadoResponse = trap;
+                Log("Select an opposing Spell/Trap for Dust Tornado.");
+                return true;
+            }
+            if (trap.Definition.Effect == CardEffect.MajesticStarDragon)
+                return ResolveMajesticStarNegate(Human, trap);
+            if (trap.Definition.Effect == CardEffect.ShootingStarDragon)
+            {
+                if (pendingResponseType == CardEffect.StopAttack)
+                    return ResolveShootingStarAttackNegate(Human, trap);
+                return ResolveShootingStarDestructionNegate(Human, trap);
+            }
+            if (trap.Definition.Effect == CardEffect.FormulaSynchronDraw)
+            {
+                CardDefinition synchro = FindQuickSynchro(Human, trap, out List<CardInstance> materials);
+                if (synchro == null)
+                    return Reject("Formula Synchron has no valid Synchro Summon available.");
+                return TryRespondWithFormulaSynchron(trap, synchro, materials);
+            }
             if (trap.Definition.Effect == CardEffect.StarlightRoad &&
                 (pendingResponseSourceCard == null ||
                  !WouldDestroyMultipleOwnedCards(pendingResponseSourceCard, Human)))
@@ -1616,6 +2052,35 @@ namespace DuelPrototype
                 Log("Chain Link " + chainLinkCount + " resolved.");
             }
 
+            return true;
+        }
+
+        public bool TryRespondWithDustTornado(
+            CardInstance target, CardInstance cardToSet = null)
+        {
+            if (!ResponseWindowOpen || pendingDustTornadoResponse == null ||
+                !Human.SpellTrapZones.Contains(pendingDustTornadoResponse) ||
+                GetSpellTrapOwner(target) != GetOpponent(Human))
+                return Reject("Choose an opposing Spell or Trap for Dust Tornado.");
+            if (cardToSet != null && (!Human.Hand.Contains(cardToSet) ||
+                (cardToSet.Definition.Kind != CardKind.Spell && cardToSet.Definition.Kind != CardKind.Trap)))
+                return Reject("Only a Spell or Trap in your hand can be Set by Dust Tornado.");
+
+            CardInstance dustTornado = pendingDustTornadoResponse;
+            Action resolvePending = pendingResponsePass;
+            ClearResponseWindow();
+            ActivateResponseTrap(Human, dustTornado);
+            ResolveDustTornado(Human, dustTornado, target, cardToSet);
+            if (resolvePending != null)
+                resolvePending();
+            return true;
+        }
+
+        public bool CancelDustTornadoTargetChoice()
+        {
+            if (!DustTornadoTargetChoiceOpen)
+                return false;
+            pendingDustTornadoResponse = null;
             return true;
         }
 
@@ -1773,6 +2238,12 @@ namespace DuelPrototype
                 monster.NitroWarriorBoostReady = false;
                 monster.NitroWarriorSecondAttackTarget = null;
                 monster.DrillWarriorDirectAttackThisTurn = false;
+                monster.AncientFairySummonUsedThisTurn = false;
+                monster.AncientFairyFieldEffectUsedThisTurn = false;
+                monster.MajesticTargetEffectUsedThisTurn = false;
+                monster.ShootingStarExcavationUsedThisTurn = false;
+                monster.ShootingStarDestructionNegateUsedThisTurn = false;
+                monster.ShootingStarAttackNegateUsedThisTurn = false;
                 if (monster.EffectsNegatedUntilTurn > 0 && monster.EffectsNegatedUntilTurn <= turnNumber)
                 {
                     monster.EffectsNegated = false;
@@ -1820,12 +2291,13 @@ namespace DuelPrototype
                          .Where(item => item != null &&
                                         item.Definition.Effect == CardEffect.MajesticStarDragon).ToList())
             {
-                RemoveFromMonsterZones(endingPlayer, majesticDragon);
-                endingPlayer.ExtraDeck.Add(new CardInstance(majesticDragon.Definition));
                 CardInstance stardust = endingPlayer.Graveyard.FirstOrDefault(card =>
                     card.Definition.Effect == CardEffect.StardustDragon);
-                if (stardust != null)
-                    SpecialSummonFromGraveyard(endingPlayer, stardust, true);
+                if (stardust == null)
+                    continue;
+                RemoveFromMonsterZones(endingPlayer, majesticDragon);
+                endingPlayer.ExtraDeck.Add(new CardInstance(majesticDragon.Definition));
+                SpecialSummonFromGraveyard(endingPlayer, stardust, true);
             }
             endingPlayer.BattleDamageProtectedTurn = 0;
             foreach (CardInstance monster in Human.MonsterZones.Concat(Opponent.MonsterZones)
@@ -1833,6 +2305,7 @@ namespace DuelPrototype
             {
                 monster.AttackBonus = 0;
                 monster.DefenseModifier = 0;
+                monster.LevelModifier = 0;
                 if (monster.EffectsNegatedUntilTurn > 0 &&
                     monster.EffectsNegatedUntilTurn <= turnNumber)
                 {
@@ -1847,6 +2320,19 @@ namespace DuelPrototype
                 if (!SpecialSummonFromGraveyard(endingPlayer, stardust, true))
                     continue;
                 stardust.StardustReturnPending = false;
+            }
+
+            foreach (DuelPlayer player in new[] { Human, Opponent })
+            {
+                foreach (CardInstance banishedDragon in player.Banished
+                             .Where(card => card.ReturnAtEndPhaseTurn == turnNumber).ToList())
+                {
+                    int zone = FindEmptyMonsterZone(player);
+                    if (zone < 0)
+                        continue;
+                    banishedDragon.ReturnAtEndPhaseTurn = 0;
+                    PlaceSpecialSummon(player, banishedDragon, zone, true);
+                }
             }
 
             foreach (DuelPlayer owner in new[] { Human, Opponent })
@@ -1886,11 +2372,23 @@ namespace DuelPrototype
         {
             public double Score { get; }
             public Action Execute { get; }
+            public Func<AiSimulation, bool> Simulate { get; }
+            public int Priority { get; }
 
             public AiActionCandidate(double score, Action execute)
             {
                 Score = score;
                 Execute = execute;
+            }
+
+            public AiActionCandidate(
+                Action execute,
+                Func<AiSimulation, bool> simulate,
+                int priority)
+            {
+                Execute = execute;
+                Simulate = simulate;
+                Priority = priority;
             }
         }
 
@@ -1906,6 +2404,26 @@ namespace DuelPrototype
             }
         }
 
+        private sealed class AiPlanNode
+        {
+            public DuelEngine Engine { get; }
+            public DuelPlayer Actor { get; }
+            public double Score { get; }
+            public AiActionCandidate FirstAction { get; }
+
+            public AiPlanNode(
+                DuelEngine engine,
+                DuelPlayer actor,
+                double score,
+                AiActionCandidate firstAction)
+            {
+                Engine = engine;
+                Actor = actor;
+                Score = score;
+                FirstAction = firstAction;
+            }
+        }
+
         private void RunAiTurnActions(DuelPlayer actor)
         {
             if (Phase == DuelPhase.GameOver || ResponseWindowOpen)
@@ -1914,6 +2432,7 @@ namespace DuelPrototype
             pendingAiTurnActor = actor;
             pendingAiActions.Clear();
             pendingAiActionIndex = 0;
+            aiPlannerActionsThisTurn = 0;
             if (Phase == DuelPhase.Draw)
             {
                 pendingAiActions.Add(() =>
@@ -1930,12 +2449,7 @@ namespace DuelPrototype
                     Log(actor.Name + " entered Main Phase 1.");
                 });
             }
-            pendingAiActions.Add(() => TryAiNormalSummon(actor));
-            pendingAiActions.Add(() => TryAiBossSummon(actor));
-            pendingAiActions.Add(() => TryAiFusion(actor));
-            pendingAiActions.Add(() => EnqueueSpellActions(actor));
-            pendingAiActions.Add(() => EnqueueMonsterEffectActions(actor));
-            pendingAiActions.Add(() => TryAiSynchro(actor));
+            pendingAiActions.Add(() => RunAiMainPhasePlanner(actor));
             pendingAiActions.Add(() => EnqueueTrapSetActions(actor));
             pendingAiActions.Add(() => EnqueuePositionActions(actor));
             pendingAiActions.Add(() => EnqueueBattleActions(actor));
@@ -1943,90 +2457,307 @@ namespace DuelPrototype
             pendingAiActions.Add(FinishAiTurn);
         }
 
-        private void TryAiNormalSummon(DuelPlayer actor)
+        private void RunAiMainPhasePlanner(DuelPlayer actor)
         {
-            if (actor.NormalSummonsThisTurn != 0)
+            if (CurrentPlayer != actor || !CanActInMainPhase() ||
+                aiPlannerActionsThisTurn >= AiPlannerActionsPerTurnLimit)
                 return;
 
-            DuelPlayer opponent = GetOpponent(actor);
-            List<CardInstance> field = actor.MonsterZones.Where(card => card != null).ToList();
+            AiActionCandidate firstAction = FindBestAiMainPhaseAction(actor);
+            if (firstAction == null)
+                return;
+
+            firstAction.Execute();
+            aiPlannerActionsThisTurn++;
+            if (CurrentPlayer == actor && CanActInMainPhase() &&
+                aiPlannerActionsThisTurn < AiPlannerActionsPerTurnLimit)
+                pendingAiActions.Insert(pendingAiActionIndex, () => RunAiMainPhasePlanner(actor));
+        }
+
+        private AiActionCandidate FindBestAiMainPhaseAction(DuelPlayer actor)
+        {
+            double baseline = DuelAiEvaluator.Evaluate(actor, GetOpponent(actor));
+            List<AiPlanNode> beam = new List<AiPlanNode>
+            {
+                new AiPlanNode(this, actor, baseline, null)
+            };
+            AiActionCandidate bestAction = null;
+            double bestScore = baseline;
+            int evaluationCount = 0;
+
+            for (int depth = 0; depth < AiPlannerDepth && beam.Count > 0 &&
+                 evaluationCount < AiPlannerEvaluationLimit; depth++)
+            {
+                List<AiPlanNode> nextBeam = new List<AiPlanNode>();
+                foreach (AiPlanNode node in beam)
+                {
+                    List<AiActionCandidate> candidates = SelectAiPlannerCandidates(
+                        node.Engine.GenerateAiMainPhaseCandidates(node.Actor));
+
+                    foreach (AiActionCandidate candidate in candidates)
+                    {
+                        if (evaluationCount >= AiPlannerEvaluationLimit)
+                            break;
+                        evaluationCount++;
+
+                        AiSimulation simulation = node.Engine.CreateAiSimulation();
+                        if (!candidate.Simulate(simulation) ||
+                            !ResolveAiSimulationChoices(simulation.Engine))
+                            continue;
+
+                        DuelPlayer simulatedActor = node.Actor == node.Engine.Human
+                            ? simulation.Engine.Human
+                            : simulation.Engine.Opponent;
+                        double score = DuelAiEvaluator.Evaluate(simulatedActor,
+                            simulation.Engine.GetOpponent(simulatedActor));
+                        AiActionCandidate firstAction = node.FirstAction ?? candidate;
+                        if (score > bestScore + 0.01)
+                        {
+                            bestScore = score;
+                            bestAction = firstAction;
+                        }
+                        nextBeam.Add(new AiPlanNode(
+                            simulation.Engine, simulatedActor, score, firstAction));
+                    }
+                }
+
+                beam = nextBeam.OrderByDescending(node => node.Score)
+                    .Take(AiPlannerBeamWidth).ToList();
+            }
+
+            return bestAction;
+        }
+
+        private List<AiActionCandidate> GenerateAiMainPhaseCandidates(DuelPlayer actor)
+        {
             List<AiActionCandidate> candidates = new List<AiActionCandidate>();
-            foreach (CardInstance summon in actor.Hand
-                         .Where(card => card.Definition.CanNormalSummon)
-                         .Where(card => card.Definition.Level < 5 ||
-                                        field.Count >= (card.Definition.Level >= 7 ? 2 : 1)))
+            List<CardInstance> field = actor.MonsterZones.Where(card => card != null).ToList();
+
+            foreach (CardInstance card in actor.Hand.Where(item => item.Definition.CanNormalSummon))
             {
-                int tributeCount = summon.Definition.Level >= 7 ? 2 : summon.Definition.Level >= 5 ? 1 : 0;
-                List<CardInstance> tributes = field
-                    .OrderBy(card => AiFieldMonsterValue(card, opponent))
-                    .Take(tributeCount).ToList();
-                foreach (bool setFaceDown in new[] { false, true })
+                if (actor.NormalSummonsThisTurn == 0)
                 {
-                    double score = EvaluateAiAction(actor, (simulation, cards) =>
-                            simulation.TryNormalSummon(cards[summon], tributes.Select(card => cards[card]).ToList(),
-                                setFaceDown)) +
-                        AiSummonScore(actor, summon, field, opponent, setFaceDown) * 0.001;
-                    candidates.Add(new AiActionCandidate(score,
-                        () => TryNormalSummon(summon, tributes, setFaceDown)));
+                    int tributeCount = card.Definition.Level >= 7 ? 2 :
+                        card.Definition.Level >= 5 ? 1 : 0;
+                    if (tributeCount > 0)
+                        AddAiSummonCandidate(candidates, actor, card,
+                            Array.Empty<CardInstance>(), false, 0);
+                    foreach (List<CardInstance> tributes in GetCardCombinations(field, tributeCount))
+                    {
+                        AddAiSummonCandidate(candidates, actor, card, tributes, false, 2);
+                        if (tributeCount == 0)
+                            AddAiSummonCandidate(candidates, actor, card, tributes, true, 3);
+                    }
+                }
+                else
+                {
+                    AddAiSummonCandidate(candidates, actor, card,
+                        Array.Empty<CardInstance>(), false, 0);
                 }
             }
 
-            AiActionCandidate best = candidates.OrderByDescending(candidate => candidate.Score).FirstOrDefault();
-            if (best != null)
-                best.Execute();
-        }
-
-        private void TryAiBossSummon(DuelPlayer actor)
-        {
-            foreach (CardInstance boss in actor.Hand.Where(card =>
-                         card.Definition.Effect == CardEffect.Berserkion ||
-                         card.Definition.Effect == CardEffect.Valkyrion).ToList())
+            foreach (CardInstance card in actor.Hand.Where(item =>
+                         item.Definition.Effect == CardEffect.Berserkion ||
+                         item.Definition.Effect == CardEffect.Valkyrion))
             {
-                bool berserkion = boss.Definition.Effect == CardEffect.Berserkion;
-                string[] required = berserkion
-                    ? new[] { "Alpha The Electromagnet Warrior", "Beta The Electromagnet Warrior", "Gamma The Electromagnet Warrior" }
-                    : new[] { "Alpha The Magnet Warrior", "Beta The Magnet Warrior", "Gamma the Magnet Warrior" };
-                IEnumerable<CardInstance> materials = berserkion
-                    ? actor.Hand.Concat(actor.Graveyard).Concat(actor.MonsterZones.Where(card => card != null && card.FaceUp))
-                    : actor.Hand.Concat(actor.MonsterZones.Where(card => card != null));
-                bool hasMaterials = required.All(name => materials.Any(card =>
-                    card != boss && card.Definition.DisplayName == name));
-                if (hasMaterials && actor.MonsterZones.Any(card => card == null) && TrySpecialSummonBoss(boss))
-                    return;
+                candidates.Add(new AiActionCandidate(
+                    () => TrySpecialSummonBoss(card),
+                    simulation => simulation.Engine.TrySpecialSummonBoss(
+                        MapAiCard(simulation, card)),
+                    0));
             }
-        }
 
-        private void TryAiFusion(DuelPlayer actor)
-        {
-            if (!actor.Hand.Any(card => card.Definition.CardId == "sdmy-en031"))
-                return;
-
-            List<CardInstance> available = actor.Hand
-                .Concat(actor.MonsterZones.Where(card => card != null && card.FaceUp))
-                .Where(card => card.Definition.CardId != "sdmy-en031")
+            IEnumerable<CardInstance> activatableCards = actor.Hand.Where(card =>
+                    card.Definition.Kind == CardKind.Spell ||
+                    card.Definition.IsEffectMonster &&
+                    CanActivateMonsterEffectFromHand(card.Definition.Effect))
+                .Concat(actor.MonsterZones.Where(card => card != null && card.FaceUp &&
+                    card.Definition.Effect != CardEffect.None))
+                .Concat(actor.Graveyard.Where(card =>
+                    CanActivateMonsterEffectFromGraveyard(card.Definition.Effect)))
+                .Distinct()
                 .ToList();
-            foreach (CardDefinition fusion in actor.ExtraDeck
-                         .Where(card => card.Definition.Kind == CardKind.Fusion)
-                         .Select(card => card.Definition).Distinct()
-                         .OrderByDescending(card => card.Attack))
+            List<CardInstance> targets = GetAiEffectTargets(actor).ToList();
+            foreach (CardInstance card in activatableCards)
             {
-                List<CardInstance> candidates = available
-                    .Where(card => IsPotentialFusionMaterial(fusion, card)).ToList();
-                for (int mask = 1; mask < (1 << candidates.Count); mask++)
+                AddAiActivationCandidate(candidates, card, null,
+                    card.Definition.Effect == CardEffect.QuickdrawSynchron ? 0 : 1);
+                foreach (CardInstance target in targets)
+                    AddAiActivationCandidate(candidates, card, target, 1);
+            }
+
+            if (!actor.SummonsLockedThisTurn)
+            {
+                foreach (CardDefinition synchro in actor.ExtraDeck
+                             .Where(card => card.Definition.Kind == CardKind.Synchro)
+                             .Select(card => card.Definition).Distinct())
                 {
-                    List<CardInstance> materials = new List<CardInstance>();
-                    for (int bit = 0; bit < candidates.Count; bit++)
+                    List<CardInstance> faceUpField = field.Where(card => card.FaceUp).ToList();
+                    foreach (List<CardInstance> materials in GetCardSubsets(faceUpField))
                     {
-                        if ((mask & (1 << bit)) != 0)
-                            materials.Add(candidates[bit]);
-                    }
-                    if (CanFusionSummon(fusion, materials, actor))
-                    {
-                        TryFusionSummon(fusion, materials);
-                        return;
+                        if (!CanSynchroSummon(synchro, materials, actor))
+                            continue;
+                        candidates.Add(new AiActionCandidate(
+                            () => TrySynchroSummon(synchro, materials),
+                            simulation => simulation.Engine.TrySynchroSummon(synchro,
+                                MapAiCards(simulation, materials)),
+                            0));
                     }
                 }
             }
+
+            if (actor.Hand.Any(card => card.Definition.CardId == "sdmy-en031"))
+            {
+                List<CardInstance> available = actor.Hand
+                    .Concat(field.Where(card => card.FaceUp))
+                    .Where(card => card.Definition.CardId != "sdmy-en031")
+                    .ToList();
+                foreach (CardDefinition fusion in actor.ExtraDeck
+                             .Where(card => card.Definition.Kind == CardKind.Fusion)
+                             .Select(card => card.Definition).Distinct())
+                {
+                    List<CardInstance> possibleMaterials = available
+                        .Where(card => IsPotentialFusionMaterial(fusion, card)).ToList();
+                    foreach (List<CardInstance> materials in GetCardSubsets(possibleMaterials))
+                    {
+                        if (!CanFusionSummon(fusion, materials, actor))
+                            continue;
+                        candidates.Add(new AiActionCandidate(
+                            () => TryFusionSummon(fusion, materials),
+                            simulation => simulation.Engine.TryFusionSummon(fusion,
+                                MapAiCards(simulation, materials)),
+                            0));
+                    }
+                }
+            }
+
+            return candidates;
+        }
+
+        private static List<AiActionCandidate> SelectAiPlannerCandidates(
+            IReadOnlyList<AiActionCandidate> candidates)
+        {
+            ILookup<int, AiActionCandidate> byPriority = candidates.ToLookup(candidate => candidate.Priority);
+            List<IEnumerator<AiActionCandidate>> groups = byPriority
+                .OrderBy(group => group.Key)
+                .Select(group => group.Take(AiPlannerCandidatesPerNode).GetEnumerator())
+                .ToList();
+            List<AiActionCandidate> selected = new List<AiActionCandidate>();
+            bool addedCandidate = true;
+            while (selected.Count < AiPlannerCandidatesPerNode && addedCandidate)
+            {
+                addedCandidate = false;
+                foreach (IEnumerator<AiActionCandidate> group in groups)
+                {
+                    if (selected.Count >= AiPlannerCandidatesPerNode)
+                        break;
+                    if (!group.MoveNext())
+                        continue;
+                    selected.Add(group.Current);
+                    addedCandidate = true;
+                }
+            }
+
+            foreach (IEnumerator<AiActionCandidate> group in groups)
+                group.Dispose();
+            return selected;
+        }
+
+        private void AddAiSummonCandidate(
+            List<AiActionCandidate> candidates,
+            DuelPlayer actor,
+            CardInstance card,
+            IReadOnlyList<CardInstance> tributes,
+            bool setFaceDown,
+            int priority)
+        {
+            List<CardInstance> chosenTributes = tributes.ToList();
+            candidates.Add(new AiActionCandidate(
+                () => TryNormalSummon(card, chosenTributes, setFaceDown),
+                simulation => simulation.Engine.TryNormalSummon(MapAiCard(simulation, card),
+                    MapAiCards(simulation, chosenTributes), setFaceDown),
+                priority));
+        }
+
+        private void AddAiActivationCandidate(
+            List<AiActionCandidate> candidates,
+            CardInstance card,
+            CardInstance target,
+            int priority)
+        {
+            candidates.Add(new AiActionCandidate(
+                () => TryActivate(card, target),
+                simulation =>
+                {
+                    CardInstance simulatedCard = MapAiCard(simulation, card);
+                    CardInstance simulatedTarget = MapAiCard(simulation, target);
+                    return simulatedCard != null &&
+                           simulation.Engine.TryActivate(simulatedCard, simulatedTarget) &&
+                           ResolveAiSimulationChoices(simulation.Engine);
+                },
+                priority));
+        }
+
+        private static CardInstance MapAiCard(AiSimulation simulation, CardInstance card)
+        {
+            return card != null && simulation.Cards.TryGetValue(card, out CardInstance mapped)
+                ? mapped
+                : null;
+        }
+
+        private static List<CardInstance> MapAiCards(
+            AiSimulation simulation,
+            IEnumerable<CardInstance> cards)
+        {
+            return cards.Select(card => MapAiCard(simulation, card)).ToList();
+        }
+
+        private static IEnumerable<List<CardInstance>> GetCardCombinations(
+            IReadOnlyList<CardInstance> cards,
+            int count)
+        {
+            if (count < 0 || count > cards.Count)
+                yield break;
+            int maskLimit = 1 << cards.Count;
+            for (int mask = 0; mask < maskLimit; mask++)
+            {
+                if (CountSetBits(mask) != count)
+                    continue;
+                List<CardInstance> combination = new List<CardInstance>();
+                for (int bit = 0; bit < cards.Count; bit++)
+                {
+                    if ((mask & (1 << bit)) != 0)
+                        combination.Add(cards[bit]);
+                }
+                yield return combination;
+            }
+        }
+
+        private static IEnumerable<List<CardInstance>> GetCardSubsets(
+            IReadOnlyList<CardInstance> cards)
+        {
+            int maskLimit = 1 << cards.Count;
+            for (int mask = 1; mask < maskLimit; mask++)
+            {
+                List<CardInstance> subset = new List<CardInstance>();
+                for (int bit = 0; bit < cards.Count; bit++)
+                {
+                    if ((mask & (1 << bit)) != 0)
+                        subset.Add(cards[bit]);
+                }
+                yield return subset;
+            }
+        }
+
+        private static int CountSetBits(int value)
+        {
+            int count = 0;
+            while (value != 0)
+            {
+                count += value & 1;
+                value >>= 1;
+            }
+            return count;
         }
 
         private static bool IsPotentialFusionMaterial(CardDefinition fusion, CardInstance card)
@@ -2054,35 +2785,6 @@ namespace DuelPrototype
             }
         }
 
-        private double AiSummonScore(
-            DuelPlayer actor,
-            CardInstance card,
-            IReadOnlyList<CardInstance> field,
-            DuelPlayer opponent,
-            bool setFaceDown)
-        {
-            double score = card.Definition.Attack + card.Definition.Defense * 0.2;
-            if (card.Definition.IsTuner)
-                score += 180;
-            if (card.Definition.Effect != CardEffect.None)
-                score += 100;
-            if (card.Definition.Level >= 5)
-                score -= 350;
-
-            if (CanEnableSynchro(actor, card, field))
-                score += 700;
-
-            bool outmatchedByVisibleAttacker = opponent.MonsterZones.Any(monster =>
-                monster != null && monster.FaceUp && monster.AttackPosition &&
-                card.Definition.Attack < monster.CurrentAttack);
-            score += AiBattlePositionScore(card.Definition.Attack, card.Definition.Defense,
-                !setFaceDown, opponent);
-            // Setting hides effects as well as stats; prefer a face-up summon when it has an effect.
-            if (setFaceDown && card.Definition.IsEffectMonster && !outmatchedByVisibleAttacker)
-                score -= 220;
-            return score;
-        }
-
         private static double AiBattlePositionScore(
             int attack,
             int defense,
@@ -2103,58 +2805,6 @@ namespace DuelPrototype
             return defense >= strongestThreat
                 ? 240 + defense * 0.1
                 : -100;
-        }
-
-        private static bool CanEnableSynchro(
-            DuelPlayer actor,
-            CardInstance candidate,
-            IReadOnlyList<CardInstance> field)
-        {
-            foreach (CardInstance extra in actor.ExtraDeck.Where(card => card.Definition.Kind == CardKind.Synchro))
-            {
-                if (!CanUseSynchroMaterial(extra.Definition, candidate))
-                    continue;
-                for (int mask = 0; mask < (1 << field.Count); mask++)
-                {
-                    int level = GetSynchroMaterialLevel(extra.Definition, candidate);
-                    int tunerCount = candidate.Definition.IsTuner ? 1 : 0;
-                    bool hasNonTuner = !candidate.Definition.IsTuner;
-                    for (int bit = 0; bit < field.Count; bit++)
-                    {
-                        if ((mask & (1 << bit)) == 0)
-                            continue;
-                        CardInstance material = field[bit];
-                        if (!CanUseSynchroMaterial(extra.Definition, material))
-                        {
-                            level = -1;
-                            break;
-                        }
-                        level += GetSynchroMaterialLevel(extra.Definition, material);
-                        if (material.Definition.IsTuner)
-                            tunerCount++;
-                        else
-                            hasNonTuner = true;
-                    }
-
-                    if (level == extra.Definition.Level && tunerCount == 1 && hasNonTuner)
-                        return true;
-                }
-            }
-            return false;
-        }
-
-        private static double AiFieldMonsterValue(CardInstance card, DuelPlayer opponent)
-        {
-            double value = card.CurrentAttack + card.Definition.Defense * 0.15;
-            if (card.Definition.IsTuner)
-                value += 250;
-            if (card.Definition.Effect != CardEffect.None)
-                value += 150;
-            if (opponent.MonsterZones.Any(monster => monster != null) &&
-                card.CurrentAttack > opponent.MonsterZones.Where(monster => monster != null)
-                    .Max(monster => monster.AttackPosition ? monster.CurrentAttack : monster.Definition.Defense))
-                value += 200;
-            return value;
         }
 
         private void EnqueueSpellActions(DuelPlayer actor)
@@ -2499,52 +3149,12 @@ namespace DuelPrototype
             BeginTurn(nextPlayer);
         }
 
-        private void TryAiSynchro(DuelPlayer actor)
-        {
-            if (actor.SummonsLockedThisTurn)
-                return;
-            List<CardInstance> field = actor.MonsterZones.Where(card => card != null && card.FaceUp).ToList();
-            if (field.Count < 2)
-                return;
-
-            CardDefinition bestSynchro = null;
-            List<CardInstance> bestMaterials = null;
-            double bestScore = 0;
-            foreach (CardInstance extra in actor.ExtraDeck
-                         .Where(card => card.Definition.Kind == CardKind.Synchro)
-                         .OrderByDescending(card => card.Definition.Attack))
-            {
-                for (int mask = 1; mask < (1 << field.Count); mask++)
-                {
-                    List<CardInstance> materials = new List<CardInstance>();
-                    for (int bit = 0; bit < field.Count; bit++)
-                    {
-                        if ((mask & (1 << bit)) != 0)
-                            materials.Add(field[bit]);
-                    }
-                    if (!IsValidSynchroMaterial(extra.Definition, materials, actor))
-                        continue;
-
-                    double score = EvaluateAiAction(actor, (simulation, cards) =>
-                        simulation.TrySynchroSummon(extra.Definition,
-                            materials.Select(card => cards[card]).ToList()));
-                    if (score > bestScore)
-                    {
-                        bestScore = score;
-                        bestSynchro = extra.Definition;
-                        bestMaterials = materials;
-                    }
-                }
-            }
-
-            if (bestSynchro != null && bestMaterials != null)
-                TrySynchroSummon(bestSynchro, bestMaterials);
-        }
-
         private bool ResolveAttack(DuelPlayer attackerOwner, CardInstance attacker, CardInstance target)
         {
             if (!CanAttackThisTurn)
                 return Reject("The first player cannot attack on the first turn of the duel.");
+            if (attackerOwner.BattlePhaseSkippedTurn == turnNumber)
+                return Reject("A card effect made you skip your Battle Phase this turn.");
             if (attackerOwner.NoAttackTurnsRemaining > 0)
                 return Reject("A card effect prevents you from attacking this turn.");
             if (attacker == null || !attackerOwner.MonsterZones.Contains(attacker) || !attacker.FaceUp ||
@@ -2602,6 +3212,7 @@ namespace DuelPrototype
                     attacker.HasAttacked = false;
                 }
                 Log(attacker.Definition.DisplayName + " attacked directly for " + attacker.CurrentAttack + " damage.");
+                IncreaseRoadSynchronLevelAfterAttack(attackerOwner, attacker);
                 CheckWinner();
                 return true;
             }
@@ -2627,12 +3238,12 @@ namespace DuelPrototype
             int attackerLifeBefore = attackerOwner.LifePoints;
             bool attackerCannotBeDestroyed = attacker.Definition.Effect == CardEffect.BlackwingArmorMaster;
             bool targetCannotBeDestroyed = target.Definition.Effect == CardEffect.BlackwingArmorMaster ||
-                (defender.MonsterZones.Any(card => card != null && card.FaceUp &&
-                    card.Definition.Effect == CardEffect.BlackwingSilverwind) &&
-                 IsBlackwing(target.Definition));
+                (IsMorphtronic(target.Definition) && defender.MonsterZones.Any(card =>
+                    card != null && card != target && card.FaceUp && !card.AttackPosition &&
+                    card.Definition.Effect == CardEffect.MorphtronicBoarden));
             if (attackerAttack > targetPower)
             {
-                if (!targetCannotBeDestroyed)
+                if (!targetCannotBeDestroyed && !TrySilverwindBattleProtection(defender, target))
                     SendMonsterToGraveyard(defender, target, true);
                 if (attacker.Definition.Effect == CardEffect.BlackwingShura &&
                     defender.Graveyard.Contains(target))
@@ -2668,7 +3279,7 @@ namespace DuelPrototype
                 {
                     if (!attackerCannotBeDestroyed)
                         SendMonsterToGraveyard(attackerOwner, attacker, true);
-                    if (!targetCannotBeDestroyed)
+                    if (!targetCannotBeDestroyed && !TrySilverwindBattleProtection(defender, target))
                         SendMonsterToGraveyard(defender, target, true);
                     Log("Both battling monsters were destroyed.");
                 }
@@ -2740,8 +3351,33 @@ namespace DuelPrototype
             if (target.Definition.Effect == CardEffect.BlackwingMistral &&
                 defender.Graveyard.Contains(target))
                 defender.BattleDamageProtectedTurn = turnNumber;
+            IncreaseRoadSynchronLevelAfterAttack(attackerOwner, attacker);
             CheckWinner();
             return true;
+        }
+
+        private bool TrySilverwindBattleProtection(DuelPlayer owner, CardInstance monster)
+        {
+            if (owner == null || monster == null || !IsBlackwing(monster.Definition) ||
+                CurrentPlayer == owner)
+                return false;
+            CardInstance silverwind = owner.MonsterZones.FirstOrDefault(card =>
+                card != null && card.FaceUp &&
+                card.Definition.Effect == CardEffect.BlackwingSilverwind &&
+                card.SilverwindProtectionTurn != turnNumber);
+            if (silverwind == null)
+                return false;
+            silverwind.SilverwindProtectionTurn = turnNumber;
+            Log(owner.Name + "'s " + monster.Definition.DisplayName +
+                " was protected from battle destruction by Silverwind.");
+            return true;
+        }
+
+        private static void IncreaseRoadSynchronLevelAfterAttack(DuelPlayer owner, CardInstance attacker)
+        {
+            if (attacker != null && owner.MonsterZones.Contains(attacker) &&
+                attacker.Definition.Effect == CardEffect.RoadSynchron)
+                attacker.LevelModifier++;
         }
 
         private int GetBattleAttack(CardInstance attacker, CardInstance target)
@@ -2771,6 +3407,7 @@ namespace DuelPrototype
         private void ApplyEffectDamage(DuelPlayer player, int amount)
         {
             if (amount <= 0 || player.MonsterZones.Any(card => card != null && card.FaceUp &&
+                !card.EffectsNegated &&
                 card.Definition.Effect == CardEffect.LifeStreamSetLifePoints))
                 return;
             player.LifePoints -= amount;
@@ -2871,7 +3508,7 @@ namespace DuelPrototype
                 case CardEffect.QuillboltHedgehog:
                     return SpecialSummonQuillbolt(owner, source);
                 case CardEffect.PowerToolDragon:
-                    return ResolvePowerToolDragon(owner, source);
+                    return BeginPowerToolChoice(owner, source);
                 case CardEffect.BlackwingArmorMaster:
                     foreach (CardInstance monster in opponent.MonsterZones.Where(item =>
                                  item != null && item.WedgeCounters > 0).ToList())
@@ -2886,12 +3523,15 @@ namespace DuelPrototype
                         return Reject("Select a face-up opposing monster to negate.");
                     target.EffectsNegated = true;
                     target.EffectsNegatedUntilTurn = turnNumber;
-                    return true;
-                case CardEffect.ShootingStarDragon:
-                    if (source == null || !owner.MonsterZones.Contains(source) || !source.FaceUp)
-                        return Reject("Shooting Star Dragon must be face-up on your field.");
+                        source.CopiedEffectTarget = target;
+                        source.MajesticTargetEffectUsedThisTurn = true;
+                        return true;
+                    case CardEffect.ShootingStarDragon:
+                        if (source == null || !owner.MonsterZones.Contains(source) || !source.FaceUp)
+                            return Reject("Shooting Star Dragon must be face-up on your field.");
                     int tuners = owner.Deck.Take(5).Count(card => card.Definition.IsTuner);
                     source.ExtraAttacksThisTurn = Math.Max(0, tuners - 1);
+                    source.ShootingStarExcavationUsedThisTurn = true;
                     Shuffle(owner.Deck);
                     return true;
                 default:
@@ -3010,7 +3650,12 @@ namespace DuelPrototype
 
             int count = random.Next(1, 7);
             List<CardInstance> revealed = owner.Deck.Take(count).ToList();
-            if (source.AttackPosition)
+            if (!source.AttackPosition)
+            {
+                Log(owner.Name + " looked at the top " + revealed.Count +
+                    " card(s) of the Deck with Morphtronic Celfon and returned them in the same order.");
+            }
+            else
             {
                 CardInstance summon = revealed.FirstOrDefault(card =>
                     IsMorphtronic(card.Definition) && card.Definition.Level <= 4);
@@ -3064,15 +3709,26 @@ namespace DuelPrototype
 
         private bool SpecialSummonQuickdraw(DuelPlayer owner, CardInstance source)
         {
-            CardInstance discard = owner.Hand.FirstOrDefault(card => card != source && card.Definition.IsMonster);
             int zone = FindEmptyMonsterZone(owner);
-            if (source == null || !owner.Hand.Contains(source) || discard == null || zone < 0)
-                return Reject("Quickdraw Synchron needs a monster to discard and an open Monster Zone.");
+            bool hasDiscard = source != null && owner.Hand.Any(card =>
+                card != source && card.Definition.IsMonster);
+            if (source == null || !owner.Hand.Contains(source) || !hasDiscard || zone < 0)
+                return Reject("Quickdraw Synchron needs another monster to discard and an open Monster Zone.");
             if (owner.SummonsLockedThisTurn)
                 return Reject("A card effect prevents you from Special Summoning this turn.");
-            owner.Hand.Remove(discard);
-            SendCardToGraveyard(owner, discard);
-            PlaceSpecialSummon(owner, source, zone, true);
+
+            if (owner.IsAi)
+            {
+                CardInstance discard = owner.Hand.First(card =>
+                    card != source && card.Definition.IsMonster);
+                owner.Hand.Remove(discard);
+                SendCardToGraveyard(owner, discard);
+                PlaceSpecialSummon(owner, source, zone, true);
+                return true;
+            }
+
+            pendingQuickdrawOwner = owner;
+            pendingQuickdrawSource = source;
             return true;
         }
 
@@ -3088,22 +3744,29 @@ namespace DuelPrototype
             return true;
         }
 
-        private bool ResolvePowerToolDragon(DuelPlayer owner, CardInstance source)
+        private bool BeginPowerToolChoice(DuelPlayer owner, CardInstance source)
         {
             if (source == null || !owner.MonsterZones.Contains(source) || !source.FaceUp)
                 return Reject("Power Tool Dragon must be face-up on your field.");
             List<CardInstance> equips = owner.Deck
                 .Where(card => card.Definition.Kind == CardKind.Spell &&
-                               card.Definition.Subtype == CardSubtype.Equip)
-                .Take(3).ToList();
+                               card.Definition.Subtype == CardSubtype.Equip).ToList();
             if (equips.Count < 3)
                 return Reject("Power Tool Dragon needs three Equip Spells in your Deck.");
-            CardInstance selected = equips[random.Next(equips.Count)];
-            foreach (CardInstance equip in equips)
-                owner.Deck.Remove(equip);
-            owner.Hand.Add(selected);
-            owner.Deck.AddRange(equips.Where(card => card != selected));
-            Shuffle(owner.Deck);
+            if (owner.IsAi)
+            {
+                List<CardInstance> revealed = equips.Take(3).ToList();
+                CardInstance selected = revealed[random.Next(revealed.Count)];
+                foreach (CardInstance equip in revealed)
+                    owner.Deck.Remove(equip);
+                owner.Hand.Add(selected);
+                owner.Deck.AddRange(revealed.Where(card => card != selected));
+                Shuffle(owner.Deck);
+                return true;
+            }
+            pendingPowerToolChoiceSource = source;
+            pendingPowerToolChoices = equips;
+            Log(owner.Name + " must choose three Equip Spells to reveal with Power Tool Dragon.");
             return true;
         }
 
@@ -3701,7 +4364,7 @@ namespace DuelPrototype
         private ResponseAttempt OpenResponseWindow(
             DuelPlayer defender, CardEffect eventType, CardInstance source, Action onPass, Action onCancelled)
         {
-            List<CardInstance> responses = GetResponseCards(defender, eventType);
+            List<CardInstance> responses = GetResponseCards(defender, eventType, source);
             if (eventType == CardEffect.DestroyAllMonsters &&
                 (source == null || source.CurrentAttack < 1500))
                 responses.RemoveAll(card => card.Definition.Effect == CardEffect.BottomlessTrapHole);
@@ -3712,6 +4375,69 @@ namespace DuelPrototype
             if (defender.IsAi || IsAiVsAi)
             {
                 CardInstance aiTrap = responses[0];
+                if (aiTrap.Definition.Effect == CardEffect.DustTornado)
+                {
+                    CardInstance target = GetOpponent(defender).SpellTrapZones
+                        .Concat(new[] { GetOpponent(defender).FieldSpellZone })
+                        .FirstOrDefault(card => card != null);
+                    if (target == null)
+                        return ResponseAttempt.None;
+                    ActivateResponseTrap(defender, aiTrap);
+                    ResolveDustTornado(defender, aiTrap, target,
+                        defender.Hand.FirstOrDefault(card => card.Definition.Kind == CardKind.Spell ||
+                            card.Definition.Kind == CardKind.Trap));
+                    if (onPass != null)
+                        onPass();
+                    return ResponseAttempt.Cancelled;
+                }
+                if (aiTrap.Definition.Effect == CardEffect.MajesticStarDragon)
+                {
+                    RemoveFromMonsterZones(defender, aiTrap);
+                    defender.Graveyard.Add(aiTrap);
+                    if (onCancelled != null)
+                        onCancelled();
+                    foreach (CardInstance fieldCard in GetAllFieldCards()
+                                 .Where(card => GetCardController(card) == GetOpponent(defender)).ToList())
+                        DestroyFieldCard(fieldCard);
+                    CheckWinner();
+                    Log("Majestic Star Dragon negated the activation and destroyed all cards its opponent controlled.");
+                    return ResponseAttempt.Cancelled;
+                }
+                if (aiTrap.Definition.Effect == CardEffect.ShootingStarDragon)
+                {
+                    if (eventType == CardEffect.StopAttack)
+                    {
+                        RemoveFromMonsterZones(defender, aiTrap);
+                        defender.Banished.Add(aiTrap);
+                        aiTrap.ShootingStarAttackNegateUsedThisTurn = true;
+                        aiTrap.ReturnAtEndPhaseTurn = turnNumber;
+                        Log("Shooting Star Dragon banished itself to negate the attack.");
+                    }
+                    else
+                    {
+                        if (!IsDestructionEffect(source))
+                            return ResponseAttempt.None;
+                        aiTrap.ShootingStarDestructionNegateUsedThisTurn = true;
+                        aiTrap.EffectUsedThisTurn = true;
+                        if (onCancelled != null)
+                            onCancelled();
+                        DuelPlayer sourceOwner = GetCardController(source);
+                        if (sourceOwner != null)
+                            DestroyFieldCard(source);
+                        Log("Shooting Star Dragon negated and destroyed " + source.Definition.DisplayName + "'s effect.");
+                    }
+                    return ResponseAttempt.Cancelled;
+                }
+                if (aiTrap.Definition.Effect == CardEffect.FormulaSynchronDraw)
+                {
+                    CardDefinition quickSynchro = FindQuickSynchro(defender, aiTrap,
+                        out List<CardInstance> quickMaterials);
+                    if (quickSynchro == null || !ResolveSynchroSummon(defender, quickSynchro, quickMaterials))
+                        return ResponseAttempt.None;
+                    if (onPass != null)
+                        onPass();
+                    return ResponseAttempt.Cancelled;
+                }
                 if (aiTrap.Definition.Effect == CardEffect.StardustDragon)
                 {
                     if (!IsDestructionEffect(source))
@@ -3842,16 +4568,45 @@ namespace DuelPrototype
             responseDiscardCostPaid = false;
             responseDiscardReason = null;
             pendingResponseType = CardEffect.None;
+            pendingDustTornadoResponse = null;
         }
 
-        private List<CardInstance> GetResponseCards(DuelPlayer player, CardEffect eventType)
+        private List<CardInstance> GetResponseCards(
+            DuelPlayer player, CardEffect eventType, CardInstance source = null)
         {
-            if (player == null || Human.MonsterZones.Concat(Opponent.MonsterZones)
-                    .Any(monster => monster != null && monster.FaceUp &&
-                                    !monster.EffectsNegated &&
-                                    monster.Definition.Effect == CardEffect.JinzoTrapLock))
+            if (player == null)
                 return new List<CardInstance>();
             List<CardInstance> responses = GetResponseTraps(player, eventType);
+            bool opponentActivation = eventType == CardEffect.CounterSpell ||
+                eventType == CardEffect.CounterMonsterEffect || eventType == CardEffect.CounterTrap;
+            if (opponentActivation)
+            {
+                CardInstance majestic = player.MonsterZones.FirstOrDefault(card =>
+                    card != null && card.FaceUp && !card.EffectsNegated &&
+                    card.Definition.Effect == CardEffect.MajesticStarDragon);
+                if (majestic != null)
+                    responses.Add(majestic);
+                CardInstance formula = player.MonsterZones.FirstOrDefault(card =>
+                    card != null && card.FaceUp && !card.EffectsNegated &&
+                    card.Definition.Effect == CardEffect.FormulaSynchronDraw);
+                if (formula != null && FindQuickSynchro(player, formula, out _ ) != null)
+                    responses.Add(formula);
+                CardInstance shootingStar = player.MonsterZones.FirstOrDefault(card =>
+                    card != null && card.FaceUp && !card.EffectsNegated &&
+                    card.Definition.Effect == CardEffect.ShootingStarDragon &&
+                    !card.ShootingStarDestructionNegateUsedThisTurn);
+                if (shootingStar != null && IsDestructionEffect(source))
+                    responses.Add(shootingStar);
+            }
+            if (eventType == CardEffect.StopAttack)
+            {
+                CardInstance shootingStar = player.MonsterZones.FirstOrDefault(card =>
+                    card != null && card.FaceUp && !card.EffectsNegated &&
+                    card.Definition.Effect == CardEffect.ShootingStarDragon &&
+                    !card.ShootingStarAttackNegateUsedThisTurn);
+                if (shootingStar != null)
+                    responses.Add(shootingStar);
+            }
             if ((eventType == CardEffect.CounterSpell || eventType == CardEffect.CounterMonsterEffect) &&
                 player.MonsterZones.Any(card => card != null && card.FaceUp &&
                                                 card.Definition.Effect == CardEffect.StardustDragon &&
@@ -3875,6 +4630,11 @@ namespace DuelPrototype
                 return false;
             switch (source.Definition.Effect)
             {
+                case CardEffect.DestroySpellTrap:
+                case CardEffect.DustTornado:
+                case CardEffect.DestroyAllSpellTraps:
+                case CardEffect.DestroyOpponentSpellTraps:
+                case CardEffect.RaigekiBreak:
                 case CardEffect.DestroyAllMonsters:
                 case CardEffect.DestroyAllOpponentMonsters:
                 case CardEffect.DestroyWeakest:
@@ -3943,12 +4703,15 @@ namespace DuelPrototype
                       card.Definition.Effect == CardEffect.MirrorForce ||
                       card.Definition.Effect == CardEffect.CompulsoryEvacuationDevice ||
                       card.Definition.Effect == CardEffect.ScrapIronScarecrow ||
+                      card.Definition.Effect == CardEffect.DustTornado ||
                       card.Definition.DisplayName == "Magic Cylinder"
                     : eventType == CardEffect.DestroyAllMonsters
                         ? card.Definition.Effect == CardEffect.TorrentialTribute ||
-                          card.Definition.Effect == CardEffect.BottomlessTrapHole
+                          card.Definition.Effect == CardEffect.BottomlessTrapHole ||
+                          card.Definition.Effect == CardEffect.DustTornado
                         : card.Definition.Effect == CardEffect.SolemnJudgment ||
                           card.Definition.Effect == CardEffect.StarlightRoad ||
+                          card.Definition.Effect == CardEffect.DustTornado ||
                           (card.Definition.Effect == eventType &&
                            card.Definition.Subtype == CardSubtype.Counter))).ToList();
         }
@@ -4121,9 +4884,15 @@ namespace DuelPrototype
                 materials.Any(card => card == null || !card.FaceUp || !owner.MonsterZones.Contains(card) ||
                     !CanUseSynchroMaterial(synchro, card)))
                 return false;
-            return materials.Sum(card => GetSynchroMaterialLevel(synchro, card)) == synchro.Level &&
-                   materials.Count(card => card.Definition.IsTuner) == 1 &&
-                   materials.Any(card => !card.Definition.IsTuner);
+            if (materials.Sum(card => GetSynchroMaterialLevel(synchro, card)) != synchro.Level ||
+                materials.Count(card => card.Definition.IsTuner) != 1 ||
+                !materials.Any(card => !card.Definition.IsTuner))
+                return false;
+            if (synchro.Effect == CardEffect.BlackwingSilverwind &&
+                (materials.Count(card => !card.Definition.IsTuner) < 2 ||
+                 !materials.Any(card => card.Definition.IsTuner && IsBlackwing(card.Definition))))
+                return false;
+            return true;
         }
 
         private static bool CanUseSynchroMaterial(CardDefinition synchro, CardInstance material)
@@ -4146,12 +4915,14 @@ namespace DuelPrototype
             return true;
         }
 
-        private static int GetSynchroMaterialLevel(CardDefinition synchro, CardInstance material)
+        public static int GetSynchroMaterialLevel(CardDefinition synchro, CardInstance material)
         {
             int level = material.Definition.Level + material.LevelModifier;
             if (material.Definition.Effect == CardEffect.RoadSynchron &&
                 !string.Equals(synchro.DisplayName, "Road Warrior", StringComparison.OrdinalIgnoreCase))
                 level -= 2;
+            if (material.Definition.Effect == CardEffect.TuningwareDraw)
+                level = 2;
             return level;
         }
 
@@ -4238,7 +5009,43 @@ namespace DuelPrototype
         {
             if (monster == null || monster.CannotBeDestroyedByCardEffects)
                 return false;
+            if (TryReplaceMonsterDestruction(owner, monster))
+                return false;
+            MonsterDestroyed?.Invoke(owner, monster);
             SendMonsterToGraveyard(owner, monster);
+            return true;
+        }
+
+        private bool TryReplaceMonsterDestruction(DuelPlayer owner, CardInstance monster)
+        {
+            if (owner == null || monster == null || !owner.MonsterZones.Contains(monster) ||
+                monster.EffectsNegated || !monster.FaceUp)
+                return false;
+
+            if (monster.Definition.Effect == CardEffect.LifeStreamSetLifePoints)
+            {
+                CardInstance equip = owner.Graveyard.FirstOrDefault(card =>
+                    card.Definition.Kind == CardKind.Spell && card.Definition.Subtype == CardSubtype.Equip);
+                if (equip == null)
+                    return false;
+                owner.Graveyard.Remove(equip);
+                owner.Banished.Add(equip);
+                Log(owner.Name + " banished " + equip.Definition.DisplayName +
+                    " to prevent Life Stream Dragon's destruction.");
+                return true;
+            }
+
+            if (monster.Definition.Effect != CardEffect.PowerToolDragon)
+                return false;
+            CardInstance equipped = owner.SpellTrapZones.FirstOrDefault(card =>
+                card != null && card.FaceUp && card.Definition.Kind == CardKind.Spell &&
+                card.Definition.Subtype == CardSubtype.Equip && card.EquippedMonster == monster);
+            if (equipped == null)
+                return false;
+            RemoveFromSpellTrapZones(owner, equipped);
+            owner.Graveyard.Add(equipped);
+            Log(owner.Name + " sent " + equipped.Definition.DisplayName +
+                " to the Graveyard to prevent Power Tool Dragon's destruction.");
             return true;
         }
 
@@ -4400,7 +5207,8 @@ namespace DuelPrototype
             bool toGraveyard,
             string prompt,
             bool applySanganRestriction = false,
-            bool specialSummon = false)
+            bool specialSummon = false,
+            bool optional = false)
         {
             if (specialSummon && owner.SummonsLockedThisTurn)
                 return Reject("A card effect prevents you from Special Summoning this turn.");
@@ -4425,6 +5233,7 @@ namespace DuelPrototype
             pendingDeckChoiceToGraveyard = toGraveyard;
             pendingDeckChoiceSanganRestriction = applySanganRestriction;
             pendingDeckChoiceSpecialSummon = specialSummon;
+            pendingDeckChoiceOptional = optional;
             Log(owner.Name + " must choose a card from the Deck.");
             return true;
         }
@@ -4484,6 +5293,7 @@ namespace DuelPrototype
             pendingDeckChoiceToGraveyard = false;
             pendingDeckChoiceSanganRestriction = false;
             pendingDeckChoiceSpecialSummon = false;
+            pendingDeckChoiceOptional = false;
         }
 
         private static bool MatchesDeckEffectFilter(CardDefinition effect, CardInstance candidate)
@@ -4612,7 +5422,8 @@ namespace DuelPrototype
 
         private bool CanActInMainPhase()
         {
-            return !SearchChoiceOpen && CurrentPlayer != null &&
+            return !SearchChoiceOpen && !PowerToolChoiceOpen && !QuickdrawDiscardChoiceOpen &&
+                   CurrentPlayer != null &&
                    (Phase == DuelPhase.MainOne || Phase == DuelPhase.MainTwo);
         }
 
@@ -4676,6 +5487,10 @@ namespace DuelPrototype
         {
             if (owner == null || monster == null || !owner.MonsterZones.Contains(monster))
                 return;
+            if (byBattle && TryReplaceMonsterDestruction(owner, monster))
+                return;
+            if (byBattle)
+                MonsterDestroyed?.Invoke(owner, monster);
 
             if (!byBattle && monster.Definition.Effect == CardEffect.BlackwingMistral)
                 owner.BattleDamageProtectedTurn = turnNumber;

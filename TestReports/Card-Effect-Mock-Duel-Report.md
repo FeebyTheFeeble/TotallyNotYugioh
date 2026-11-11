@@ -1,6 +1,6 @@
 # Registered Card Behavior Test Report
 
-Generated: 2026-11-09 09:26:49
+Generated: 2026-11-10 21:13:27
 
 A card is considered working only when it has an explicitly associated card-specific behavior test and all associated tests pass. Imported text and effect mappings do not count as behavior coverage. Cards with imported effect mappings but without a passing behavior test are reported as FAIL.
 
@@ -19,12 +19,12 @@ Every unique catalog card is counted once. Vanilla normal monsters and Token def
 | Implemented card category | Cards |
 |---|---:|
 | Normal / Token cards with no effect | 763 |
-| Other tested effects | 18 |
+| Other tested effects | 19 |
 | Special Summon / revive monsters | 16 |
 | Modify stats / battle behavior | 13 |
-| Remove or disable a targeted card | 10 |
 | Draw cards / card advantage | 9 |
 | Negate effects / stop attacks | 9 |
+| Remove or disable a targeted card | 9 |
 | Destroy multiple cards | 8 |
 | Create Tokens / summon from Deck | 4 |
 | Search the Deck and add to hand | 4 |
@@ -47,8 +47,8 @@ Every unique catalog card is counted once. Vanilla normal monsters and Token def
 | Unique cards in the four structure decks | 68 |
 | Structure-deck cards with passing behavior tests | 68 |
 | Structure-deck cards failing behavior coverage | 0 |
-| Structure-deck-specific behavior tests | 109 |
-| Passing structure-deck-specific behavior tests | 109 |
+| Structure-deck-specific behavior tests | 126 |
+| Passing structure-deck-specific behavior tests | 126 |
 | Cards with imported effect mappings | 94 |
 | Mapped cards with passing behavior tests | 94 |
 | Mapped cards failing behavior coverage | 0 |
@@ -56,7 +56,7 @@ Every unique catalog card is counted once. Vanilla normal monsters and Token def
 | Non-structure mapped cards failing behavior coverage | 0 |
 | Non-structure card-specific behavior tests | 29 |
 | Mock-duel scenarios passed | 10 |
-| Card/effect report tests passed | 142 |
+| Card/effect report tests passed | 160 |
 | Card/effect report tests failed | 0 |
 
 The structure-deck table tracks all 68 cards in the four configured decks. The additional-card table tracks every catalog card with an imported effect mapping outside those decks. Other CSV cards with no imported effect mapping are not yet considered implemented or covered.
@@ -68,7 +68,7 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | PASSED | Ai_attack_emits_the_same_attack_event_as_a_human_attack |  |
 | PASSED | Ai_turn_steps_advance_only_one_phase_command_at_a_time |  |
 | PASSED | Ai_uses_Harpies_Feather_Duster_when_destroying_four_cards_is_profitable |  |
-| PASSED | Ancient_Fairy_Dragon_draws_after_a_synchro_summon |  |
+| PASSED | Ancient_Fairy_Dragon_does_not_draw_on_Synchro_Summon_and_can_activate_both_Main_Phase_effects |  |
 | PASSED | Ancient_Fairy_Dragon_is_not_mapped_to_Life_Stream_Dragon_effect |  |
 | PASSED | Black_Rose_Dragon_destroys_all_field_cards_when_Synchro_Summoned |  |
 | PASSED | Black_Whirlwind_searches_a_lower_ATK_Blackwing_after_a_Normal_Summon |  |
@@ -120,7 +120,8 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | PASSED | Example_duel_state_json_files_load("opponent-battle-phase.json",Battle) |  |
 | PASSED | Example_duel_state_json_files_load("starter-main-phase.json",MainOne) |  |
 | PASSED | Foolish_Burial_sends_a_selected_monster_from_the_Deck_to_the_Graveyard |  |
-| PASSED | Formula_Synchron_and_Tuningware_draw_through_the_shared_draw_action |  |
+| PASSED | Formula_Synchron_can_Quick_Synchro_Summon_during_the_opponents_Main_Phase_using_itself_and_still_draw |  |
+| PASSED | Formula_Synchron_draws_when_Synchro_Summoned |  |
 | PASSED | Giant_Trunade_returns_Spell_and_Trap_cards_to_their_owners_hands |  |
 | PASSED | Goyo_Guardian_takes_control_of_a_monster_it_destroys_by_battle |  |
 | PASSED | Graceful_Charity_draws_three_then_discards_two_other_cards |  |
@@ -137,13 +138,17 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | PASSED | Junk_Synchron_revives_a_Level_two_or_lower_monster_on_Normal_Summon |  |
 | PASSED | Junk_Warrior_gains_ATK_from_other_low_Level_monsters_after_Synchro_Summoning |  |
 | PASSED | Level_Eater_reduces_a_high_Level_monster_and_special_summons_itself |  |
+| PASSED | Life_Stream_Dragon_sets_LP_only_when_Synchro_Summoned_and_banishes_an_Equip_to_prevent_destruction |  |
 | PASSED | Life_Stream_Dragon_sets_Life_Points_and_prevents_Zephyros_effect_damage |  |
 | PASSED | Lightning_Vortex_discards_one_card_and_destroys_only_face_up_opponent_monsters |  |
 | PASSED | Limiter_Removal_doubles_Machine_ATK_then_destroys_the_boosted_monster |  |
 | PASSED | Machine_Duplication_special_summons_up_to_two_matching_low_attack_machines |  |
 | PASSED | Magic_Jammer_discards_a_card_to_negate_a_Spell_activation |  |
 | PASSED | Majestic_Dragon_can_only_be_used_for_a_Majestic_Synchro_Summon |  |
+| PASSED | Majestic_Star_Dragon_can_activate_a_negated_opponents_monster_effect_as_its_own |  |
 | PASSED | Majestic_Star_Dragon_negates_an_opposing_monster_and_returns_to_the_Extra_Deck |  |
+| PASSED | Majestic_Star_Dragon_returns_to_the_Extra_Deck_and_Special_Summons_Stardust_in_the_End_Phase |  |
+| PASSED | Majestic_Star_Dragon_tributes_itself_to_negate_an_activation_and_destroy_the_opponents_field |  |
 | PASSED | Mirror_Force_destroys_all_attacking_monsters_when_the_opponent_declares_an_attack |  |
 | PASSED | Mirror_Force_destroys_all_opposing_attack_position_monsters |  |
 | PASSED | Mock_duel_AI_Sangan_selects_a_valid_monster_automatically |  |
@@ -163,6 +168,8 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | PASSED | Mock_duel_tribute_summons_a_level_five_monster |  |
 | PASSED | Monster_Reborn_special_summons_a_target_from_either_Graveyard |  |
 | PASSED | Morphtronic_Boarden_allows_Morphtronic_direct_attacks_from_defense_position |  |
+| PASSED | Morphtronic_Boarden_protects_other_Morphtronics_from_battle_destruction_and_keeps_direct_attacks |  |
+| PASSED | Morphtronic_Celfon_in_Defense_Position_looks_at_and_returns_the_top_cards_in_the_same_order |  |
 | PASSED | Morphtronic_Celfon_summons_a_low_Level_Morphtronic_from_the_revealed_cards |  |
 | PASSED | Morphtronic_Remoten_banishes_a_Graveyard_target_and_searches_its_Level |  |
 | PASSED | Morphtronic_Remoten_in_Defense_Position_recovers_a_same_Level_Graveyard_card |  |
@@ -177,12 +184,18 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | PASSED | Pot_of_Avarice_returns_five_Graveyard_monsters_and_draws_two_cards |  |
 | PASSED | Pot_of_Greed_draws_two_cards_from_the_Deck |  |
 | PASSED | Power_Tool_Dragon_adds_one_of_three_Equip_Spells_and_shuffles_the_others_back |  |
+| PASSED | Power_Tool_Dragon_reveals_three_controller_selected_Equip_Spells_and_sends_one_attached_Equip_to_prevent_destruction |  |
+| PASSED | Quickdraw_Synchron_cannot_be_Special_Summoned_without_a_discard_or_open_zone |  |
 | PASSED | Quickdraw_Synchron_discards_a_monster_to_special_summon_itself_from_the_hand |  |
+| PASSED | Quickdraw_Synchron_does_not_pay_its_discard_cost_when_Special_Summoning_is_locked |  |
+| PASSED | Quickdraw_Synchron_requires_a_monster_to_discard |  |
 | PASSED | Quillbolt_Hedgehog_revives_while_a_Tuner_is_controlled_and_is_banished_when_it_leaves |  |
 | PASSED | Raigeki_Break_discards_a_card_and_destroys_a_selected_field_card |  |
 | PASSED | Raigeki_destroys_all_opponent_monsters_only |  |
 | PASSED | Red_Dragon_Archfiend_destroys_all_Defense_Position_monsters_it_attacks |  |
 | PASSED | Reinforcement_of_the_Army_searches_only_a_Warrior_of_level_four_or_less |  |
+| PASSED | Replay_state_can_be_captured_while_ai_actions_are_pending |  |
+| PASSED | Road_Synchron_gains_one_Level_after_attacking_until_End_Phase_and_keeps_its_material_reduction |  |
 | PASSED | Road_Synchron_reduces_its_Synchro_Material_Level_by_two_for_other_Synchros |  |
 | PASSED | Road_Synchron_reduces_its_level_for_other_Synchro_Summons |  |
 | PASSED | Sakuretsu_Armor_destroys_the_attacking_monster |  |
@@ -190,7 +203,11 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | PASSED | Scapegoat_special_summons_up_to_four_tokens_and_locks_summons |  |
 | PASSED | Scapegoat_tokens_cannot_be_Tributed_for_a_Tribute_Summon |  |
 | PASSED | Scrap_Iron_Scarecrow_negates_an_attack_and_sets_itself_again |  |
+| PASSED | Shooting_Star_Dragon_banishes_to_negate_an_attack_and_returns_in_the_next_End_Phase |  |
 | PASSED | Shooting_Star_Dragon_excavates_Tuners_to_gain_additional_attacks |  |
+| PASSED | Shooting_Star_Dragon_negates_and_destroys_an_opponents_destruction_effect |  |
+| PASSED | Silverwind_lets_the_controller_choose_up_to_two_valid_targets_instead_of_choosing_for_them |  |
+| PASSED | Silverwind_protects_only_the_first_Blackwing_that_would_be_destroyed_by_battle_each_opponent_turn |  |
 | PASSED | Smashing_Ground_destroys_the_opponent_face_up_monster_with_highest_Defense |  |
 | PASSED | Solemn_Judgment_pays_half_Life_Points_and_negates_a_Spell_activation |  |
 | PASSED | Stardust_Dragon_negates_destruction_and_returns_in_the_End_Phase |  |
@@ -205,6 +222,7 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | PASSED | Tribute_summon_reports_the_summoned_card_and_materials |  |
 | PASSED | Troop_Dragon_summons_a_copy_from_the_Deck_when_destroyed_by_battle |  |
 | PASSED | Tuning_searches_a_Synchron_Tuner_then_sends_the_new_top_card_to_the_Graveyard |  |
+| PASSED | Tuningware_can_be_treated_as_Level_2_for_a_Synchro_Summon_and_still_draws |  |
 | PASSED | Turbo_Synchron_summons_a_low_ATK_monster_after_battle_damage |  |
 | PASSED | Witch_of_the_Black_Forest_searches_a_monster_with_1500_or_less_DEF_when_sent_from_the_field |  |
 
@@ -227,7 +245,7 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 
 | Card ID | Card | Result | Card-specific behavior tests |
 |---|---|---|---|
-| 25862681 | Ancient Fairy Dragon | PASS | Ancient_Fairy_Dragon_draws_after_a_synchro_summon: PASSED |
+| 25862681 | Ancient Fairy Dragon | PASS | Ancient_Fairy_Dragon_does_not_draw_on_Synchro_Summon_and_can_activate_both_Main_Phase_effects: PASSED |
 | 73580471 | Black Rose Dragon | PASS | Black_Rose_Dragon_destroys_all_field_cards_when_Synchro_Summoned: PASSED |
 | 91351370 | Black Whirlwind | PASS | Black_Whirlwind_searches_a_lower_ATK_Blackwing_after_a_Normal_Summon: PASSED |
 | 22835145 | Blackwing - Blizzard the Far North | PASS | Blackwing_Blizzard_revives_a_low_Level_Blackwing_in_Defense_Position: PASSED |
@@ -236,10 +254,10 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | 85215458 | Blackwing - Kalut the Moon Shadow | PASS | Blackwing_Kalut_boosts_a_Blackwing_that_has_declared_an_attack: PASSED |
 | 46710683 | Blackwing - Mistral the Silver Shield | PASS | Blackwing_Mistral_prevents_the_next_battle_damage_after_it_is_destroyed: PASSED |
 | 58820853 | Blackwing - Shura the Blue Flame | PASS | Blackwing_Shura_summons_a_low_attack_Blackwing_after_battle: PASSED |
-| 33236860 | Blackwing - Silverwind the Ascendant | PASS | Blackwing_Silverwind_destroys_up_to_two_lower_DEF_face_up_monsters: PASSED |
+| 33236860 | Blackwing - Silverwind the Ascendant | PASS | Blackwing_Silverwind_destroys_up_to_two_lower_DEF_face_up_monsters: PASSED; Silverwind_lets_the_controller_choose_up_to_two_valid_targets_instead_of_choosing_for_them: PASSED; Silverwind_protects_only_the_first_Blackwing_that_would_be_destroyed_by_battle_each_opponent_turn: PASSED |
 | 75498415 | Blackwing - Sirocco the Dawn | PASS | Blackwing_Sirocco_boosts_a_selected_Blackwing_by_other_Blackwings_attack: PASSED |
 | 72714392 | Blackwing - Vayu the Emblem of Honor | PASS | Blackwing_Vayu_banishes_itself_and_a_Blackwing_to_summon_a_negated_Synchro: PASSED |
-| 14785765 | Blackwing - Zephyros the Elite | PASS | Blackwing_Zephyros_returns_a_face_up_card_and_special_summons_once_per_Duel: PASSED; Life_Stream_Dragon_sets_Life_Points_and_prevents_Zephyros_effect_damage: PASSED |
+| 14785765 | Blackwing - Zephyros the Elite | PASS | Blackwing_Zephyros_returns_a_face_up_card_and_special_summons_once_per_Duel: PASSED; Life_Stream_Dragon_sets_Life_Points_and_prevents_Zephyros_effect_damage: PASSED; Life_Stream_Dragon_sets_LP_only_when_Synchro_Summoned_and_banishes_an_Equip_to_prevent_destruction: PASSED |
 | 76913983 | Blackwing Armed Wing | PASS | Blackwing_Armed_Wing_gains_ATK_and_pierces_Defense_Position: PASSED |
 | 69031175 | Blackwing Armor Master | PASS | Blackwing_Armor_Master_survives_battle_and_applies_Wedge_Counters: PASSED |
 | 14087893 | Book of Moon | PASS | Book_of_Moon_sets_a_face_up_monster_to_face_down_defense: PASSED |
@@ -253,7 +271,7 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | 53855409 | Doppelwarrior | PASS | Doppelwarrior_creates_two_tokens_when_used_as_Synchro_material: PASSED; Doppelwarrior_special_summons_from_hand_after_a_monster_is_revived: PASSED |
 | 3429238 | Drill Warrior | PASS | Drill_Warrior_halves_its_ATK_and_can_attack_directly: PASSED; Drill_Warrior_returns_on_the_next_Standby_Phase_and_recovers_a_monster: PASSED |
 | 81439173 | Foolish Burial | PASS | Foolish_Burial_sends_a_selected_monster_from_the_Deck_to_the_Graveyard: PASSED |
-| 50091196 | Formula Synchron | PASS | Formula_Synchron_and_Tuningware_draw_through_the_shared_draw_action: PASSED |
+| 50091196 | Formula Synchron | PASS | Formula_Synchron_can_Quick_Synchro_Summon_during_the_opponents_Main_Phase_using_itself_and_still_draw: PASSED; Formula_Synchron_draws_when_Synchro_Summoned: PASSED |
 | 7391448 | Goyo Guardian | PASS | Goyo_Guardian_takes_control_of_a_monster_it_destroys_by_battle: PASSED |
 | 53567095 | Icarus Attack | PASS | Icarus_Attack_tributes_a_Winged_Beast_and_destroys_two_field_cards: PASSED |
 | 77585513 | Jinzo | PASS | Jinzo_does_not_block_Trap_activation_when_its_effect_is_negated: PASSED; Jinzo_prevents_Set_Trap_Cards_from_being_activated: PASSED |
@@ -261,31 +279,31 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | 63977008 | Junk Synchron | PASS | Junk_Synchron_revives_a_Level_two_or_lower_monster_on_Normal_Summon: PASSED |
 | 60800381 | Junk Warrior | PASS | Junk_Warrior_gains_ATK_from_other_low_Level_monsters_after_Synchro_Summoning: PASSED |
 | 57421866 | Level Eater | PASS | Level_Eater_reduces_a_high_Level_monster_and_special_summons_itself: PASSED |
-| 25165047 | Life Stream Dragon | PASS | Life_Stream_Dragon_sets_Life_Points_and_prevents_Zephyros_effect_damage: PASSED |
+| 25165047 | Life Stream Dragon | PASS | Life_Stream_Dragon_sets_Life_Points_and_prevents_Zephyros_effect_damage: PASSED; Life_Stream_Dragon_sets_LP_only_when_Synchro_Summoned_and_banishes_an_Equip_to_prevent_destruction: PASSED |
 | 23171610 | Limiter Removal | PASS | Limiter_Removal_doubles_Machine_ATK_then_destroys_the_boosted_monster: PASSED |
 | 63995093 | Machine Duplication | PASS | Machine_Duplication_special_summons_up_to_two_matching_low_attack_machines: PASSED |
 | 21159309 | Majestic Dragon | PASS | Majestic_Dragon_can_only_be_used_for_a_Majestic_Synchro_Summon: PASSED |
-| 7841112 | Majestic Star Dragon | PASS | Majestic_Star_Dragon_negates_an_opposing_monster_and_returns_to_the_Extra_Deck: PASSED |
+| 7841112 | Majestic Star Dragon | PASS | Majestic_Star_Dragon_can_activate_a_negated_opponents_monster_effect_as_its_own: PASSED; Majestic_Star_Dragon_negates_an_opposing_monster_and_returns_to_the_Extra_Deck: PASSED; Majestic_Star_Dragon_returns_to_the_Extra_Deck_and_Special_Summons_Stardust_in_the_End_Phase: PASSED; Majestic_Star_Dragon_tributes_itself_to_negate_an_activation_and_destroy_the_opponents_field: PASSED |
 | 44095762 | Mirror Force | PASS | Mirror_Force_destroys_all_attacking_monsters_when_the_opponent_declares_an_attack: PASSED; Mirror_Force_destroys_all_opposing_attack_position_monsters: PASSED |
 | 83764719 | Monster Reborn | PASS | Monster_Reborn_special_summons_a_target_from_either_Graveyard: PASSED |
-| 48381268 | Morphtronic Boarden | PASS | Morphtronic_Boarden_allows_Morphtronic_direct_attacks_from_defense_position: PASSED |
-| 93542102 | Morphtronic Celfon | PASS | Morphtronic_Celfon_summons_a_low_Level_Morphtronic_from_the_revealed_cards: PASSED |
+| 48381268 | Morphtronic Boarden | PASS | Morphtronic_Boarden_allows_Morphtronic_direct_attacks_from_defense_position: PASSED; Morphtronic_Boarden_protects_other_Morphtronics_from_battle_destruction_and_keeps_direct_attacks: PASSED |
+| 93542102 | Morphtronic Celfon | PASS | Morphtronic_Celfon_in_Defense_Position_looks_at_and_returns_the_top_cards_in_the_same_order: PASSED; Morphtronic_Celfon_summons_a_low_Level_Morphtronic_from_the_revealed_cards: PASSED |
 | 57108202 | Morphtronic Remoten | PASS | Morphtronic_Remoten_banishes_a_Graveyard_target_and_searches_its_Level: PASSED; Morphtronic_Remoten_in_Defense_Position_recovers_a_same_Level_Graveyard_card: PASSED |
 | 5318639 | Mystical Space Typhoon | PASS | Mock_duel_does_not_consume_mystical_space_typhoon_for_an_invalid_target: PASSED; Mock_duel_resolves_mystical_space_typhoon_against_a_set_card: PASSED |
 | 18013090 | Nitro Warrior | PASS | Nitro_Warrior_gains_ATK_after_a_Spell_and_can_make_its_follow_up_attack: PASSED |
 | 2295440 | One for One | PASS | One_for_One_discards_a_monster_and_summons_a_Level_one_monster_from_the_Deck: PASSED |
 | 67169062 | Pot of Avarice | PASS | Pot_of_Avarice_returns_five_Graveyard_monsters_and_draws_two_cards: PASSED |
-| 2403771 | Power Tool Dragon | PASS | Power_Tool_Dragon_adds_one_of_three_Equip_Spells_and_shuffles_the_others_back: PASSED |
-| 20932152 | Quickdraw Synchron | PASS | Quickdraw_Synchron_discards_a_monster_to_special_summon_itself_from_the_hand: PASSED |
+| 2403771 | Power Tool Dragon | PASS | Power_Tool_Dragon_adds_one_of_three_Equip_Spells_and_shuffles_the_others_back: PASSED; Power_Tool_Dragon_reveals_three_controller_selected_Equip_Spells_and_sends_one_attached_Equip_to_prevent_destruction: PASSED |
+| 20932152 | Quickdraw Synchron | PASS | Quickdraw_Synchron_cannot_be_Special_Summoned_without_a_discard_or_open_zone: PASSED; Quickdraw_Synchron_discards_a_monster_to_special_summon_itself_from_the_hand: PASSED; Quickdraw_Synchron_does_not_pay_its_discard_cost_when_Special_Summoning_is_locked: PASSED; Quickdraw_Synchron_requires_a_monster_to_discard: PASSED |
 | 23571046 | Quillbolt Hedgehog | PASS | Quillbolt_Hedgehog_revives_while_a_Tuner_is_controlled_and_is_banished_when_it_leaves: PASSED |
 | 70902743 | Red Dragon Archfiend | PASS | Red_Dragon_Archfiend_destroys_all_Defense_Position_monsters_it_attacks: PASSED |
 | 32807846 | Reinforcement of the Army | PASS | Reinforcement_of_the_Army_searches_only_a_Warrior_of_level_four_or_less: PASSED |
-| 71971554 | Road Synchron | PASS | Road_Synchron_reduces_its_Synchro_Material_Level_by_two_for_other_Synchros: PASSED |
+| 71971554 | Road Synchron | PASS | Road_Synchron_gains_one_Level_after_attacking_until_End_Phase_and_keeps_its_material_reduction: PASSED; Road_Synchron_reduces_its_Synchro_Material_Level_by_two_for_other_Synchros: PASSED |
 | 56120475 | Sakuretsu Armor | PASS | Sakuretsu_Armor_destroys_the_attacking_monster: PASSED |
 | 26202165 | Sangan | PASS | Mock_duel_AI_Sangan_selects_a_valid_monster_automatically: PASSED; Mock_duel_Sangan_can_only_search_once_per_turn: PASSED; Mock_duel_Sangan_does_not_trigger_when_not_sent_from_the_field: PASSED; Mock_duel_Sangan_searches_a_legal_monster_and_applies_its_activation_restriction: PASSED |
 | 73915051 | Scapegoat | PASS | Scapegoat_allows_a_Normal_Set_but_prevents_other_summons_that_turn: PASSED; Scapegoat_special_summons_up_to_four_tokens_and_locks_summons: PASSED; Scapegoat_tokens_cannot_be_Tributed_for_a_Tribute_Summon: PASSED |
 | 98427577 | Scrap-Iron Scarecrow | PASS | Scrap_Iron_Scarecrow_negates_an_attack_and_sets_itself_again: PASSED |
-| 24696097 | Shooting Star Dragon | PASS | Shooting_Star_Dragon_excavates_Tuners_to_gain_additional_attacks: PASSED |
+| 24696097 | Shooting Star Dragon | PASS | Shooting_Star_Dragon_banishes_to_negate_an_attack_and_returns_in_the_next_End_Phase: PASSED; Shooting_Star_Dragon_excavates_Tuners_to_gain_additional_attacks: PASSED; Shooting_Star_Dragon_negates_and_destroys_an_opponents_destruction_effect: PASSED |
 | 41420027 | Solemn Judgment | PASS | Solemn_Judgment_pays_half_Life_Points_and_negates_a_Spell_activation: PASSED |
 | 44508094 | Stardust Dragon | PASS | Stardust_Dragon_negates_destruction_and_returns_in_the_End_Phase: PASSED |
 | 68543408 | Stardust Xiaolong | PASS | Stardust_Xiaolong_revives_when_Stardust_Dragon_is_Synchro_Summoned: PASSED |
@@ -293,7 +311,7 @@ The structure-deck table tracks all 68 cards in the four configured decks. The a
 | 36643046 | Synchron Explorer | PASS | Synchron_Explorer_revives_a_Synchron_with_its_effects_negated: PASSED |
 | 53582587 | Torrential Tribute | PASS | Torrential_Tribute_responds_to_a_normal_summon: PASSED |
 | 96363153 | Tuning | PASS | Tuning_searches_a_Synchron_Tuner_then_sends_the_new_top_card_to_the_Graveyard: PASSED |
-| 92676637 | Tuningware | PASS | Formula_Synchron_and_Tuningware_draw_through_the_shared_draw_action: PASSED |
+| 92676637 | Tuningware | PASS | Tuningware_can_be_treated_as_Level_2_for_a_Synchro_Summon_and_still_draws: PASSED |
 | 67270095 | Turbo Synchron | PASS | Turbo_Synchron_summons_a_low_ATK_monster_after_battle_damage: PASSED |
 
 ## Additional imported-effect card status

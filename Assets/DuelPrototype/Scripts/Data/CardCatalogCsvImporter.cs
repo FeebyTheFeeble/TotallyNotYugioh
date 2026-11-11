@@ -127,7 +127,7 @@ namespace DuelPrototype
                 ,{ "77414722", new ImportedEffect(CardEffect.CounterSpell) }
                 ,{ "49010598", new ImportedEffect(CardEffect.CounterMonsterEffect) }
                 ,{ "14315573", new ImportedEffect(CardEffect.StopAttack) }
-                ,{ "60082869", new ImportedEffect(CardEffect.DestroySpellTrap) }
+                ,{ "60082869", new ImportedEffect(CardEffect.DustTornado) }
                 ,{ "4178474", new ImportedEffect(CardEffect.RaigekiBreak) }
                 ,{ "70231910", new ImportedEffect(CardEffect.DarkCoreBanish) }
             };

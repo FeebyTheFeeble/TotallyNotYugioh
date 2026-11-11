@@ -46,6 +46,7 @@ namespace DuelPrototype
         public int cannotChangePositionUntilTurn;
         public int noAttackTurnsRemaining;
         public int positionChangesLockedTurnsRemaining;
+        public int battlePhaseSkippedTurn;
     }
 
     [Serializable]
@@ -81,7 +82,17 @@ namespace DuelPrototype
         public bool banishWhenLeavingField;
         public bool cannotBeTributedForTributeSummon;
         public int cannotBeTributedForTributeSummonUntilTurn;
+        public bool ancientFairySummonUsedThisTurn;
+        public bool ancientFairyFieldEffectUsedThisTurn;
+        public bool majesticTargetEffectUsedThisTurn;
+        public bool shootingStarExcavationUsedThisTurn;
+        public bool shootingStarDestructionNegateUsedThisTurn;
+        public bool shootingStarAttackNegateUsedThisTurn;
+        public bool wasSynchroSummoned;
+        public int silverwindProtectionTurn;
+        public int returnAtEndPhaseTurn;
         public string[] fusionMaterialIds = Array.Empty<string>();
         public string equippedMonsterId;
+        public string copiedEffectTargetId;
     }
 }

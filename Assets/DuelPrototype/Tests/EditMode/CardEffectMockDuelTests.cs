@@ -378,6 +378,24 @@ namespace DuelPrototype.Tests
         }
 
         [Test]
+        public void Replay_state_can_be_captured_while_ai_actions_are_pending()
+        {
+            DuelEngine aiEngine = new DuelEngine();
+            aiEngine.StartMatch(
+                StarterCatalog.CreateStarterDeck(),
+                StarterCatalog.CreateAiDeck(),
+                aiVsAi: true);
+
+            Assert.IsTrue(aiEngine.StepAiTurn());
+            Assert.IsTrue(aiEngine.HasPendingAiActions);
+            Assert.Throws<InvalidOperationException>(() => aiEngine.CaptureState());
+            DuelStateSnapshot snapshot = aiEngine.CaptureStateForReplay();
+
+            Assert.IsNotNull(snapshot);
+            Assert.AreEqual(aiEngine.TurnNumber, snapshot.turnNumber);
+        }
+
+        [Test]
         public void Duel_state_json_rejects_unsupported_schema_versions()
         {
             DuelStateSnapshot snapshot = engine.CaptureState();
@@ -385,6 +403,63 @@ namespace DuelPrototype.Tests
 
             Assert.Throws<FormatException>(() =>
                 DuelStateJson.Deserialize(JsonUtility.ToJson(snapshot)));
+        }
+
+        [Test]
+        [CardBehaviorTest("20932152")]
+        public void Quickdraw_Synchron_requires_a_monster_to_discard()
+        {
+            CardInstance quickdraw = new CardInstance(StarterCatalog.Find("20932152"));
+            CardInstance discard = new CardInstance(
+                CreateTestCard("quickdraw-discard", "Discard Spell", CardKind.Spell, 0));
+            engine.Human.Hand.AddRange(new[] { quickdraw, discard });
+
+            try
+            {
+                Assert.IsFalse(engine.TryActivate(quickdraw));
+                CollectionAssert.AreEqual(new[] { quickdraw, discard }, engine.Human.Hand);
+                Assert.IsFalse(engine.Human.Graveyard.Contains(discard));
+                Assert.IsTrue(engine.Human.MonsterZones.All(card => card == null));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(discard.Definition);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("20932152")]
+        public void Quickdraw_Synchron_cannot_be_Special_Summoned_without_a_discard_or_open_zone()
+        {
+            CardInstance quickdraw = new CardInstance(StarterCatalog.Find("20932152"));
+            engine.Human.Hand.Add(quickdraw);
+
+            Assert.IsFalse(engine.TryActivate(quickdraw));
+            Assert.Contains(quickdraw, engine.Human.Hand);
+
+            engine.Human.Hand.Add(new CardInstance(StarterCatalog.Find("13039848")));
+            for (int i = 0; i < engine.Human.MonsterZones.Length; i++)
+                engine.Human.MonsterZones[i] = new CardInstance(StarterCatalog.Find("13039848"));
+
+            Assert.IsFalse(engine.TryActivate(quickdraw));
+            Assert.Contains(quickdraw, engine.Human.Hand);
+            Assert.AreEqual(2, engine.Human.Hand.Count);
+        }
+
+        [Test]
+        [CardBehaviorTest("20932152")]
+        public void Quickdraw_Synchron_does_not_pay_its_discard_cost_when_Special_Summoning_is_locked()
+        {
+            CardInstance quickdraw = new CardInstance(StarterCatalog.Find("20932152"));
+            CardInstance discard = new CardInstance(StarterCatalog.Find("13039848"));
+            engine.Human.Hand.AddRange(new[] { quickdraw, discard });
+            engine.Human.SummonsLockedThisTurn = true;
+
+            Assert.IsFalse(engine.TryActivate(quickdraw));
+
+            CollectionAssert.AreEqual(new[] { quickdraw, discard }, engine.Human.Hand);
+            Assert.IsEmpty(engine.Human.Graveyard);
+            Assert.IsTrue(engine.Human.MonsterZones.All(card => card == null));
         }
 
         [Test]
@@ -814,14 +889,15 @@ namespace DuelPrototype.Tests
 
         [Test]
         [CardBehaviorTest("50091196")]
-        [CardBehaviorTest("92676637")]
-        public void Formula_Synchron_and_Tuningware_draw_through_the_shared_draw_action()
+        public void Formula_Synchron_draws_when_Synchro_Summoned()
         {
             CardInstance tuner = new CardInstance(StarterCatalog.Find("67270095"));
-            CardInstance tuningware = new CardInstance(StarterCatalog.Find("92676637"));
+            CardDefinition materialDefinition = CreateTestCard(
+                "formula-summon-material", "Level 1 Material", CardKind.Monster, 1);
+            CardInstance material = new CardInstance(materialDefinition);
             CardDefinition formulaSynchron = StarterCatalog.Find("50091196");
             engine.Human.MonsterZones[0] = tuner;
-            engine.Human.MonsterZones[1] = tuningware;
+            engine.Human.MonsterZones[1] = material;
             engine.Human.ExtraDeck.Clear();
             engine.Human.ExtraDeck.Add(new CardInstance(formulaSynchron));
             engine.Human.Deck.Clear();
@@ -831,10 +907,16 @@ namespace DuelPrototype.Tests
                 new CardInstance(StarterCatalog.Find("23571046"))
             });
 
-            Assert.IsTrue(engine.TrySynchroSummon(formulaSynchron, new[] { tuner, tuningware }));
-
-            Assert.AreEqual(2, engine.Human.Hand.Count);
-            Assert.IsEmpty(engine.Human.Deck);
+            try
+            {
+                Assert.IsTrue(engine.TrySynchroSummon(formulaSynchron, new[] { tuner, material }));
+                Assert.AreEqual(1, engine.Human.Hand.Count);
+                Assert.AreEqual(1, engine.Human.Deck.Count);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(materialDefinition);
+            }
         }
 
         [Test]
@@ -1155,24 +1237,64 @@ namespace DuelPrototype.Tests
 
         [Test]
         [CardBehaviorTest("25862681")]
-        public void Ancient_Fairy_Dragon_draws_after_a_synchro_summon()
+        public void Ancient_Fairy_Dragon_does_not_draw_on_Synchro_Summon_and_can_activate_both_Main_Phase_effects()
         {
-            CardDefinition tunerDefinition = StarterCatalog.Find("63977008");
-            CardDefinition nonTunerDefinition = StarterCatalog.Find("49003716");
+            CardDefinition tunerDefinition = CreateTestCard(
+                "ancient-fairy-tuner", "Level 3 Tuner", CardKind.Monster, 3, isTuner: true);
+            CardDefinition nonTunerDefinition = CreateTestCard(
+                "ancient-fairy-material", "Level 4 Material", CardKind.Monster, 4);
             CardDefinition synchroDefinition = StarterCatalog.Find("25862681");
             CardInstance tuner = new CardInstance(tunerDefinition);
             CardInstance nonTuner = new CardInstance(nonTunerDefinition);
+            CardInstance handMonster = new CardInstance(StarterCatalog.Find("93542102"));
+            CardDefinition firstFieldDefinition = StarterCatalog.Find("295517");
+            CardDefinition secondFieldDefinition = StarterCatalog.Find("77297908");
+            CardDefinition sameNameFieldDefinition = StarterCatalog.Find("295517");
+            CardDefinition differentFieldDefinition = StarterCatalog.Find("35956022");
+            CardInstance firstField = new CardInstance(firstFieldDefinition);
+            CardInstance secondField = new CardInstance(secondFieldDefinition);
+            CardInstance sameNameField = new CardInstance(sameNameFieldDefinition);
+            CardInstance differentField = new CardInstance(differentFieldDefinition);
             engine.Human.MonsterZones[0] = tuner;
             engine.Human.MonsterZones[1] = nonTuner;
+            engine.Human.Hand.Add(handMonster);
+            engine.Human.FieldSpellZone = firstField;
+            engine.Opponent.FieldSpellZone = secondField;
             engine.Human.ExtraDeck.Clear();
             engine.Human.ExtraDeck.Add(new CardInstance(synchroDefinition));
-            int handCount = engine.Human.Hand.Count;
+            engine.Human.Deck.Clear();
+            engine.Human.Deck.AddRange(new[] { sameNameField, differentField });
 
-            Assert.IsTrue(engine.TrySynchroSummon(synchroDefinition, new[] { tuner, nonTuner }));
+            try
+            {
+                Assert.IsTrue(engine.TrySynchroSummon(synchroDefinition, new[] { tuner, nonTuner }));
+                Assert.AreEqual(1, engine.Human.Hand.Count);
 
-            Assert.AreEqual(handCount + 1, engine.Human.Hand.Count);
-            Assert.IsTrue(engine.Human.MonsterZones.Any(card =>
-                card != null && card.Definition == synchroDefinition));
+                CardInstance ancientFairy = engine.Human.MonsterZones
+                    .First(card => card != null && card.Definition.Effect == CardEffect.AncientFairyDragon);
+                Assert.IsTrue(engine.TryActivateAncientFairyDragonSummon(ancientFairy, handMonster));
+                Assert.Contains(handMonster, engine.Human.MonsterZones);
+                Assert.AreEqual(engine.TurnNumber, engine.Human.BattlePhaseSkippedTurn);
+
+                Assert.IsTrue(engine.TryActivateAncientFairyDragonFieldEffect(ancientFairy));
+                Assert.AreEqual(9000, engine.Human.LifePoints);
+                Assert.Contains(firstField, engine.Human.Graveyard);
+                Assert.Contains(secondField, engine.Opponent.Graveyard);
+                Assert.IsTrue(engine.SearchChoiceOpen);
+                Assert.IsFalse(engine.AvailableSearchCards.Contains(sameNameField));
+                Assert.IsTrue(engine.TryChooseSearchCard(differentField));
+                Assert.Contains(differentField, engine.Human.Hand);
+                Assert.Contains(sameNameField, engine.Human.Deck);
+
+                Assert.IsFalse(engine.AdvanceToPhase(DuelPhase.Battle));
+                engine.AdvancePhase();
+                Assert.AreEqual(DuelPhase.MainTwo, engine.Phase);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(tunerDefinition);
+                UnityEngine.Object.DestroyImmediate(nonTunerDefinition);
+            }
         }
 
         [Test]
@@ -1428,6 +1550,53 @@ namespace DuelPrototype.Tests
 
             Assert.Contains(featherDuster, aiEngine.Opponent.Graveyard);
             Assert.IsEmpty(aiEngine.Human.SpellTrapZones.Where(card => card != null));
+        }
+
+        [Test]
+        [CardBehaviorTest("49003716")]
+        public void Ai_special_summons_Bora_after_using_its_Normal_Summon()
+        {
+            DuelEngine aiEngine = new DuelEngine();
+            aiEngine.StartMatch(StarterCatalog.CreateStarterDeck(),
+                StarterCatalog.CreateAiDeck(), aiVsAi: true, humanGoesFirst: false);
+            CardInstance bora = new CardInstance(StarterCatalog.Find("49003716"));
+            aiEngine.Opponent.Hand.Clear();
+            aiEngine.Opponent.Hand.Add(bora);
+            aiEngine.Opponent.MonsterZones[0] =
+                new CardInstance(StarterCatalog.Find("58820853"));
+            aiEngine.Opponent.NormalSummonsThisTurn = 1;
+
+            for (int action = 0; action < 32 &&
+                 !aiEngine.Opponent.MonsterZones.Contains(bora); action++)
+                Assert.IsTrue(aiEngine.StepAiTurn());
+
+            Assert.Contains(bora, aiEngine.Opponent.MonsterZones);
+            Assert.AreEqual(1, aiEngine.Opponent.NormalSummonsThisTurn);
+        }
+
+        [Test]
+        [CardBehaviorTest("58820853")]
+        [CardBehaviorTest("49003716")]
+        public void Ai_plans_a_normal_summon_then_special_summons_Bora()
+        {
+            DuelEngine aiEngine = new DuelEngine();
+            aiEngine.StartMatch(StarterCatalog.CreateStarterDeck(),
+                StarterCatalog.CreateAiDeck(), aiVsAi: true, humanGoesFirst: false);
+            CardInstance shura = new CardInstance(StarterCatalog.Find("58820853"));
+            CardInstance bora = new CardInstance(StarterCatalog.Find("49003716"));
+            aiEngine.Opponent.Hand.Clear();
+            aiEngine.Opponent.Hand.AddRange(new[] { shura, bora });
+            aiEngine.Human.Hand.Clear();
+            aiEngine.Opponent.MonsterZones[0] = null;
+
+            for (int action = 0; action < 32 &&
+                 (!aiEngine.Opponent.MonsterZones.Contains(shura) ||
+                  !aiEngine.Opponent.MonsterZones.Contains(bora)); action++)
+                Assert.IsTrue(aiEngine.StepAiTurn());
+
+            Assert.Contains(shura, aiEngine.Opponent.MonsterZones);
+            Assert.Contains(bora, aiEngine.Opponent.MonsterZones);
+            Assert.AreEqual(1, aiEngine.Opponent.NormalSummonsThisTurn);
         }
 
         [Test]
@@ -1857,9 +2026,16 @@ namespace DuelPrototype.Tests
             {
                 Assert.IsTrue(engine.TrySynchroSummon(
                     silverwind, new[] { tuner, firstMaterial, secondMaterial }));
-                Assert.Contains(firstTarget, engine.Human.Graveyard);
+                CardInstance summonedSilverwind = engine.Human.MonsterZones
+                    .First(card => card != null && card.Definition == silverwind);
+                CardInstance unselectedTarget = new CardInstance(StarterCatalog.Find("93542102"));
+                engine.Opponent.MonsterZones[1] = unselectedTarget;
+                Assert.IsTrue(engine.TryActivateBlackwingSilverwind(
+                    summonedSilverwind, new[] { secondTarget, unselectedTarget }));
                 Assert.Contains(secondTarget, engine.Opponent.Graveyard);
-                Assert.AreEqual(1, engine.Human.NoAttackTurnsRemaining);
+                Assert.Contains(unselectedTarget, engine.Opponent.Graveyard);
+                Assert.Contains(firstTarget, engine.Human.MonsterZones);
+                Assert.AreEqual(engine.TurnNumber, engine.Human.BattlePhaseSkippedTurn);
             }
             finally
             {
@@ -2550,6 +2726,8 @@ namespace DuelPrototype.Tests
             try
             {
                 Assert.IsTrue(engine.TryActivate(powerTool));
+                Assert.IsTrue(engine.PowerToolChoiceOpen);
+                Assert.IsTrue(engine.TryChoosePowerToolCards(equips));
 
                 Assert.AreEqual(1, engine.Human.Hand.Count(card =>
                     card.Definition.Subtype == CardSubtype.Equip));
@@ -2569,12 +2747,20 @@ namespace DuelPrototype.Tests
         {
             CardInstance quickdraw = new CardInstance(StarterCatalog.Find("20932152"));
             CardInstance discard = new CardInstance(StarterCatalog.Find("93542102"));
-            engine.Human.Hand.AddRange(new[] { quickdraw, discard });
+            CardInstance otherMonster = new CardInstance(StarterCatalog.Find("13039848"));
+            engine.Human.Hand.AddRange(new[] { quickdraw, discard, otherMonster });
 
             Assert.IsTrue(engine.TryActivate(quickdraw));
 
+            Assert.IsTrue(engine.QuickdrawDiscardChoiceOpen);
+            CollectionAssert.AreEqual(new[] { discard, otherMonster }, engine.AvailableQuickdrawDiscards);
+            CollectionAssert.AreEqual(new[] { quickdraw, discard, otherMonster }, engine.Human.Hand);
+            Assert.IsTrue(engine.TryChooseQuickdrawDiscard(discard));
+
             Assert.Contains(quickdraw, engine.Human.MonsterZones);
             Assert.Contains(discard, engine.Human.Graveyard);
+            Assert.Contains(otherMonster, engine.Human.Hand);
+            Assert.IsFalse(engine.QuickdrawDiscardChoiceOpen);
         }
 
         [Test]
@@ -2807,17 +2993,21 @@ namespace DuelPrototype.Tests
             CardInstance target = new CardInstance(mirrorForce, false);
             CardInstance otherSetCard = new CardInstance(mirrorForce, false);
             CardInstance ownSetCard = new CardInstance(mirrorForce, false);
+            CardInstance cardToSet = new CardInstance(StarterCatalog.Find("56747793"));
             engine.Human.SpellTrapZones[0] = dustTornado;
             engine.Human.SpellTrapZones[1] = ownSetCard;
+            engine.Human.Hand.Add(cardToSet);
             engine.Opponent.SpellTrapZones[0] = target;
             engine.Opponent.SpellTrapZones[1] = otherSetCard;
 
             Assert.IsFalse(engine.TryActivate(dustTornado, ownSetCard));
             Assert.IsTrue(engine.Human.SpellTrapZones.Contains(dustTornado));
-            Assert.IsTrue(engine.TryActivate(dustTornado, target));
+            Assert.IsTrue(engine.TryActivateDustTornado(dustTornado, target, cardToSet));
 
             Assert.Contains(target, engine.Opponent.Graveyard);
             Assert.IsTrue(engine.Opponent.SpellTrapZones.Contains(otherSetCard));
+            Assert.Contains(cardToSet, engine.Human.SpellTrapZones);
+            Assert.IsFalse(cardToSet.FaceUp);
             Assert.Contains(dustTornado, engine.Human.Graveyard);
         }
 
@@ -2907,6 +3097,469 @@ namespace DuelPrototype.Tests
 
             Assert.Contains(firstTarget, engine.Opponent.Graveyard);
             Assert.Contains(secondTarget, engine.Opponent.Graveyard);
+        }
+
+        [Test]
+        [CardBehaviorTest("50091196")]
+        public void Formula_Synchron_can_Quick_Synchro_Summon_during_the_opponents_Main_Phase_using_itself_and_still_draw()
+        {
+            CardDefinition formulaDefinition = StarterCatalog.Find("50091196");
+            CardDefinition formulaTunerDefinition = CreateTestCard(
+                "formula-summon-tuner", "Level 1 Tuner", CardKind.Monster, 1, isTuner: true);
+            CardDefinition formulaNonTunerDefinition = CreateTestCard(
+                "formula-summon-material", "Level 1 Material", CardKind.Monster, 1);
+            CardDefinition quickMaterialDefinition = CreateTestCard(
+                "formula-quick-material", "Level 3 Material", CardKind.Monster, 3);
+            CardInstance formulaTuner = new CardInstance(formulaTunerDefinition);
+            CardInstance formulaNonTuner = new CardInstance(formulaNonTunerDefinition);
+            CardInstance formula;
+            CardInstance quickMaterial = new CardInstance(quickMaterialDefinition);
+            CardDefinition synchro = StarterCatalog.Find("60800381");
+            engine.Human.MonsterZones[0] = formulaTuner;
+            engine.Human.MonsterZones[1] = formulaNonTuner;
+            engine.Human.ExtraDeck.Clear();
+            engine.Human.ExtraDeck.Add(new CardInstance(formulaDefinition));
+            engine.Human.Deck.Clear();
+            CardInstance draw = new CardInstance(StarterCatalog.Find("13039848"));
+            engine.Human.Deck.Add(draw);
+
+            try
+            {
+                Assert.IsTrue(engine.TrySynchroSummon(
+                    formulaDefinition, new[] { formulaTuner, formulaNonTuner }));
+                formula = engine.Human.MonsterZones.First(card =>
+                    card != null && card.Definition.Effect == CardEffect.FormulaSynchronDraw);
+                Assert.Contains(draw, engine.Human.Hand);
+                engine.Human.MonsterZones[1] = quickMaterial;
+                engine.Human.ExtraDeck.Clear();
+                engine.Human.ExtraDeck.Add(new CardInstance(synchro));
+                SetCurrentPlayer(engine.Opponent);
+                SetPhase(DuelPhase.MainOne);
+
+                Assert.IsFalse(engine.TryQuickSynchroSummon(formula, synchro, new[] { quickMaterial }));
+                Assert.IsTrue(engine.TryQuickSynchroSummon(formula, synchro, new[] { formula, quickMaterial }));
+
+                Assert.Contains(formula, engine.Human.Graveyard);
+                Assert.Contains(draw, engine.Human.Hand);
+                Assert.IsTrue(engine.Human.MonsterZones.Any(card => card != null && card.Definition == synchro));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(formulaTunerDefinition);
+                UnityEngine.Object.DestroyImmediate(formulaNonTunerDefinition);
+                UnityEngine.Object.DestroyImmediate(quickMaterialDefinition);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("25165047")]
+        [CardBehaviorTest("14785765")]
+        public void Life_Stream_Dragon_sets_LP_only_when_Synchro_Summoned_and_banishes_an_Equip_to_prevent_destruction()
+        {
+            CardDefinition tunerDefinition = CreateTestCard(
+                "life-stream-replacement-tuner", "Level 1 Tuner", CardKind.Monster, 1, isTuner: true);
+            CardInstance tuner = new CardInstance(tunerDefinition);
+            CardInstance powerTool = new CardInstance(StarterCatalog.Find("2403771"));
+            CardDefinition lifeStream = StarterCatalog.Find("25165047");
+            CardInstance equip = new CardInstance(StarterCatalog.Find("56747793"));
+            CardInstance darkHole = new CardInstance(StarterCatalog.Find("53129443"));
+            engine.Human.MonsterZones[0] = tuner;
+            engine.Human.MonsterZones[1] = powerTool;
+            engine.Human.Graveyard.Add(equip);
+            engine.Human.Hand.Add(darkHole);
+            engine.Human.LifePoints = 5100;
+            engine.Human.ExtraDeck.Clear();
+            engine.Human.ExtraDeck.Add(new CardInstance(lifeStream));
+            CardInstance otherMonster = new CardInstance(StarterCatalog.Find("93542102"));
+            engine.Opponent.MonsterZones[0] = otherMonster;
+
+            try
+            {
+                Assert.IsTrue(engine.TrySynchroSummon(lifeStream, new[] { tuner, powerTool }));
+                CardInstance summoned = engine.Human.MonsterZones
+                    .First(card => card != null && card.Definition == lifeStream);
+                Assert.AreEqual(4000, engine.Human.LifePoints);
+
+                typeof(DuelEngine).GetMethod("ApplyEffectDamage", PrivateInstance)
+                    .Invoke(engine, new object[] { engine.Human, 500 });
+                Assert.AreEqual(4000, engine.Human.LifePoints);
+                Assert.IsTrue(engine.TryActivate(darkHole));
+
+                Assert.Contains(summoned, engine.Human.MonsterZones);
+                Assert.Contains(equip, engine.Human.Banished);
+                Assert.Contains(otherMonster, engine.Opponent.Graveyard);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(tunerDefinition);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("33236860")]
+        public void Silverwind_lets_the_controller_choose_up_to_two_valid_targets_instead_of_choosing_for_them()
+        {
+            CardDefinition tunerDefinition = CreateTestCard(
+                "silverwind-choice-tuner", "Blackwing Choice Tuner", CardKind.Monster, 2, isTuner: true);
+            CardDefinition firstMaterialDefinition = CreateTestCard(
+                "silverwind-choice-material-1", "Level 3 Material 1", CardKind.Monster, 3);
+            CardDefinition secondMaterialDefinition = CreateTestCard(
+                "silverwind-choice-material-2", "Level 3 Material 2", CardKind.Monster, 3);
+            CardDefinition silverwind = StarterCatalog.Find("33236860");
+            CardInstance tuner = new CardInstance(tunerDefinition);
+            CardInstance firstMaterial = new CardInstance(firstMaterialDefinition);
+            CardInstance secondMaterial = new CardInstance(secondMaterialDefinition);
+            CardInstance firstTarget = new CardInstance(StarterCatalog.Find("93542102"));
+            CardInstance selectedTarget = new CardInstance(StarterCatalog.Find("57108202"));
+            CardInstance unselectedTarget = new CardInstance(StarterCatalog.Find("93542102"));
+            engine.Human.MonsterZones[0] = tuner;
+            engine.Human.MonsterZones[1] = firstMaterial;
+            engine.Human.MonsterZones[2] = secondMaterial;
+            engine.Human.MonsterZones[3] = firstTarget;
+            engine.Opponent.MonsterZones[0] = selectedTarget;
+            engine.Opponent.MonsterZones[1] = unselectedTarget;
+            engine.Human.ExtraDeck.Clear();
+            engine.Human.ExtraDeck.Add(new CardInstance(silverwind));
+
+            try
+            {
+                Assert.IsTrue(engine.TrySynchroSummon(
+                    silverwind, new[] { tuner, firstMaterial, secondMaterial }));
+                CardInstance summoned = engine.Human.MonsterZones
+                    .First(card => card != null && card.Definition == silverwind);
+                Assert.IsTrue(engine.TryActivateBlackwingSilverwind(summoned,
+                    new[] { selectedTarget }));
+
+                Assert.Contains(selectedTarget, engine.Opponent.Graveyard);
+                Assert.Contains(unselectedTarget, engine.Opponent.MonsterZones);
+                Assert.Contains(firstTarget, engine.Human.MonsterZones);
+                Assert.AreEqual(engine.TurnNumber, engine.Human.BattlePhaseSkippedTurn);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(tunerDefinition);
+                UnityEngine.Object.DestroyImmediate(firstMaterialDefinition);
+                UnityEngine.Object.DestroyImmediate(secondMaterialDefinition);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("33236860")]
+        public void Silverwind_protects_only_the_first_Blackwing_that_would_be_destroyed_by_battle_each_opponent_turn()
+        {
+            CardInstance silverwind = new CardInstance(StarterCatalog.Find("33236860"));
+            CardInstance firstBlackwing = new CardInstance(StarterCatalog.Find("49003716"));
+            CardInstance secondBlackwing = new CardInstance(StarterCatalog.Find("22835145"));
+            CardDefinition attackerDefinition = CreateTestCard(
+                "silverwind-battle-attacker", "Strong Attacker", CardKind.Monster, 4, attack: 3000);
+            CardInstance firstAttacker = new CardInstance(attackerDefinition);
+            CardInstance secondAttacker = new CardInstance(attackerDefinition);
+            engine.Opponent.MonsterZones[0] = silverwind;
+            engine.Opponent.MonsterZones[1] = firstBlackwing;
+            engine.Opponent.MonsterZones[2] = secondBlackwing;
+            engine.Human.MonsterZones[0] = firstAttacker;
+            engine.Human.MonsterZones[1] = secondAttacker;
+            SetTurnNumber(engine, 2);
+            SetPhase(DuelPhase.Battle);
+
+            try
+            {
+                Assert.IsTrue(engine.TryAttack(firstAttacker, firstBlackwing));
+                Assert.Contains(firstBlackwing, engine.Opponent.MonsterZones);
+                Assert.IsTrue(engine.TryAttack(secondAttacker, secondBlackwing));
+
+                Assert.Contains(secondBlackwing, engine.Opponent.Graveyard);
+                Assert.Contains(firstBlackwing, engine.Opponent.MonsterZones);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(attackerDefinition);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("7841112")]
+        public void Majestic_Star_Dragon_tributes_itself_to_negate_an_activation_and_destroy_the_opponents_field()
+        {
+            CardInstance majestic = new CardInstance(StarterCatalog.Find("7841112"));
+            CardInstance darkHole = new CardInstance(StarterCatalog.Find("53129443"));
+            CardInstance opponentMonster = new CardInstance(StarterCatalog.Find("93542102"));
+            CardInstance opponentFieldSpell = new CardInstance(StarterCatalog.Find("295517"));
+            engine.Human.MonsterZones[0] = majestic;
+            engine.Opponent.Hand.Add(darkHole);
+            engine.Opponent.MonsterZones[0] = opponentMonster;
+            engine.Opponent.FieldSpellZone = opponentFieldSpell;
+            SetCurrentPlayer(engine.Opponent);
+            SetPhase(DuelPhase.MainOne);
+
+            Assert.IsTrue(engine.TryActivate(darkHole));
+            Assert.IsTrue(engine.ResponseWindowOpen);
+            Assert.IsTrue(engine.TryRespondWithTrap(majestic));
+
+            Assert.Contains(majestic, engine.Human.Graveyard);
+            Assert.Contains(darkHole, engine.Opponent.Graveyard);
+            Assert.Contains(opponentFieldSpell, engine.Opponent.Graveyard);
+            Assert.IsTrue(engine.Opponent.MonsterZones.All(card => card == null));
+        }
+
+        [Test]
+        [CardBehaviorTest("7841112")]
+        public void Majestic_Star_Dragon_can_activate_a_negated_opponents_monster_effect_as_its_own()
+        {
+            CardInstance majestic = new CardInstance(StarterCatalog.Find("7841112"));
+            CardDefinition copyDefinition = CreateTestCard(
+                "copy-draw-monster", "Copyable Draw Monster", CardKind.Monster, 4);
+            copyDefinition.Configure("copy-draw-monster", "Copyable Draw Monster", CardKind.Monster, 4,
+                1000, 1000, false, CardEffect.DrawOne, 0, "Draw 1 card.", isEffectMonster: true);
+            CardInstance copyTarget = new CardInstance(copyDefinition);
+            CardInstance draw = new CardInstance(StarterCatalog.Find("13039848"));
+            engine.Human.MonsterZones[0] = majestic;
+            engine.Opponent.MonsterZones[0] = copyTarget;
+            engine.Human.Deck.Clear();
+            engine.Human.Deck.Add(draw);
+
+            try
+            {
+                Assert.IsTrue(engine.TryActivate(majestic, copyTarget));
+                Assert.IsTrue(copyTarget.EffectsNegated);
+                Assert.AreSame(copyTarget, majestic.CopiedEffectTarget);
+                Assert.IsTrue(engine.TryActivateCopiedMonsterEffect(majestic),
+                    string.Join(" | ", engine.Messages));
+
+                Assert.Contains(draw, engine.Human.Hand);
+                Assert.IsNull(majestic.CopiedEffectTarget);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(copyDefinition);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("7841112")]
+        public void Majestic_Star_Dragon_returns_to_the_Extra_Deck_and_Special_Summons_Stardust_in_the_End_Phase()
+        {
+            CardInstance majestic = new CardInstance(StarterCatalog.Find("7841112"));
+            CardInstance stardust = new CardInstance(StarterCatalog.Find("44508094"));
+            engine.Human.MonsterZones[0] = majestic;
+            engine.Human.Graveyard.Add(stardust);
+
+            InvokeEndTurn(engine.Human);
+
+            Assert.IsTrue(engine.Human.ExtraDeck.Any(card => card.Definition == majestic.Definition));
+            Assert.Contains(stardust, engine.Human.MonsterZones);
+        }
+
+        [Test]
+        [CardBehaviorTest("24696097")]
+        public void Shooting_Star_Dragon_negates_and_destroys_an_opponents_destruction_effect()
+        {
+            CardInstance shootingStar = new CardInstance(StarterCatalog.Find("24696097"));
+            CardInstance darkHole = new CardInstance(StarterCatalog.Find("53129443"));
+            CardInstance protectedMonster = new CardInstance(StarterCatalog.Find("93542102"));
+            engine.Human.MonsterZones[0] = shootingStar;
+            engine.Opponent.Hand.Add(darkHole);
+            engine.Human.MonsterZones[1] = protectedMonster;
+            SetCurrentPlayer(engine.Opponent);
+            SetPhase(DuelPhase.MainOne);
+
+            Assert.IsTrue(engine.TryActivate(darkHole));
+            Assert.IsTrue(engine.ResponseWindowOpen);
+            Assert.IsTrue(engine.TryRespondWithTrap(shootingStar));
+
+            Assert.Contains(protectedMonster, engine.Human.MonsterZones);
+            Assert.Contains(darkHole, engine.Opponent.Graveyard);
+            Assert.IsTrue(shootingStar.ShootingStarDestructionNegateUsedThisTurn);
+        }
+
+        [Test]
+        [CardBehaviorTest("24696097")]
+        public void Shooting_Star_Dragon_banishes_to_negate_an_attack_and_returns_in_the_next_End_Phase()
+        {
+            CardInstance shootingStar = new CardInstance(StarterCatalog.Find("24696097"));
+            CardInstance attacker = new CardInstance(StarterCatalog.Find("49003716"));
+            CardDefinition targetDefinition = CreateTestCard(
+                "shooting-star-attack-target", "Attack Target", CardKind.Monster, 4, attack: 1000);
+            CardInstance target = new CardInstance(targetDefinition);
+            engine.Human.MonsterZones[0] = shootingStar;
+            engine.Human.MonsterZones[1] = target;
+            engine.Opponent.MonsterZones[0] = attacker;
+            SetTurnNumber(engine, 2);
+            SetPhase(DuelPhase.Battle);
+
+            try
+            {
+                typeof(DuelEngine).GetMethod("ResolveAttack", PrivateInstance)
+                    .Invoke(engine, new object[] { engine.Opponent, attacker, target });
+                Assert.IsTrue(engine.ResponseWindowOpen);
+                Assert.IsTrue(engine.TryRespondWithTrap(shootingStar));
+
+                Assert.Contains(shootingStar, engine.Human.Banished);
+                Assert.Contains(target, engine.Human.MonsterZones);
+                InvokeEndTurn(engine.Opponent);
+                Assert.Contains(shootingStar, engine.Human.MonsterZones);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(targetDefinition);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("2403771")]
+        public void Power_Tool_Dragon_reveals_three_controller_selected_Equip_Spells_and_sends_one_attached_Equip_to_prevent_destruction()
+        {
+            CardInstance powerTool = new CardInstance(StarterCatalog.Find("2403771"));
+            CardInstance equip1 = new CardInstance(StarterCatalog.Find("40619825"));
+            CardInstance equip2 = new CardInstance(StarterCatalog.Find("56747793"));
+            CardInstance equip3 = new CardInstance(StarterCatalog.Find("83746708"));
+            CardInstance equip4 = new CardInstance(StarterCatalog.Find("83746708"));
+            CardInstance darkHole = new CardInstance(StarterCatalog.Find("53129443"));
+            engine.Human.MonsterZones[0] = powerTool;
+            engine.Human.Deck.Clear();
+            engine.Human.Deck.AddRange(new[] { equip1, equip2, equip3, equip4 });
+            engine.Human.Hand.Add(darkHole);
+
+            Assert.IsTrue(engine.TryActivate(powerTool));
+            Assert.IsTrue(engine.PowerToolChoiceOpen);
+            Assert.IsTrue(engine.TryChoosePowerToolCards(new[] { equip2, equip3, equip4 }));
+            Assert.IsTrue(engine.Human.Hand.Any(card => card == equip2 || card == equip3 || card == equip4));
+            Assert.Contains(equip1, engine.Human.Deck);
+
+            CardInstance attachedEquip = new CardInstance(StarterCatalog.Find("56747793"))
+            {
+                FaceUp = true,
+                EquippedMonster = powerTool
+            };
+            engine.Human.SpellTrapZones[0] = attachedEquip;
+            Assert.IsTrue(engine.TryActivate(darkHole));
+
+            Assert.Contains(powerTool, engine.Human.MonsterZones);
+            Assert.Contains(attachedEquip, engine.Human.Graveyard);
+        }
+
+        [Test]
+        [CardBehaviorTest("71971554")]
+        public void Road_Synchron_gains_one_Level_after_attacking_until_End_Phase_and_keeps_its_material_reduction()
+        {
+            CardInstance road = new CardInstance(StarterCatalog.Find("71971554"));
+            CardInstance target = new CardInstance(StarterCatalog.Find("93542102"));
+            CardDefinition otherMaterial = CreateTestCard(
+                "road-post-attack-material", "Level 3 Material", CardKind.Monster, 3);
+            CardDefinition synchro = CreateTestCard(
+                "road-post-attack-synchro", "Level 6 Synchro", CardKind.Synchro, 6);
+            CardInstance other = new CardInstance(otherMaterial);
+            engine.Human.MonsterZones[0] = road;
+            engine.Human.MonsterZones[1] = other;
+            engine.Opponent.MonsterZones[0] = target;
+            SetTurnNumber(engine, 2);
+            SetPhase(DuelPhase.Battle);
+
+            try
+            {
+                Assert.IsTrue(engine.TryAttack(road, target));
+                Assert.AreEqual(1, road.LevelModifier);
+                SetPhase(DuelPhase.MainOne);
+                engine.Human.ExtraDeck.Add(new CardInstance(synchro));
+
+                Assert.IsTrue(engine.TrySynchroSummon(synchro, new[] { road, other }));
+                Assert.IsTrue(engine.Human.MonsterZones.Any(card => card != null && card.Definition == synchro));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(otherMaterial);
+                UnityEngine.Object.DestroyImmediate(synchro);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("92676637")]
+        public void Tuningware_can_be_treated_as_Level_2_for_a_Synchro_Summon_and_still_draws()
+        {
+            CardInstance tuner = new CardInstance(StarterCatalog.Find("50091196"));
+            CardInstance tuningware = new CardInstance(StarterCatalog.Find("92676637"));
+            CardDefinition synchro = CreateTestCard(
+                "tuningware-level-two-synchro", "Level 4 Synchro", CardKind.Synchro, 4);
+            CardInstance draw = new CardInstance(StarterCatalog.Find("13039848"));
+            engine.Human.MonsterZones[0] = tuner;
+            engine.Human.MonsterZones[1] = tuningware;
+            engine.Human.ExtraDeck.Add(new CardInstance(synchro));
+            engine.Human.Deck.Clear();
+            engine.Human.Deck.Add(draw);
+
+            try
+            {
+                Assert.IsTrue(engine.TrySynchroSummon(synchro, new[] { tuner, tuningware }));
+
+                Assert.Contains(tuningware, engine.Human.Graveyard);
+                Assert.Contains(draw, engine.Human.Hand);
+                Assert.Contains(synchro,
+                    engine.Human.MonsterZones.Select(card => card == null ? null : card.Definition).ToArray());
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(synchro);
+            }
+        }
+
+        [Test]
+        [CardBehaviorTest("93542102")]
+        public void Morphtronic_Celfon_in_Defense_Position_looks_at_and_returns_the_top_cards_in_the_same_order()
+        {
+            CardInstance celfon = new CardInstance(StarterCatalog.Find("93542102"), true, false);
+            List<CardInstance> topCards = new[]
+            {
+                new CardInstance(StarterCatalog.Find("93542102")),
+                new CardInstance(StarterCatalog.Find("57108202")),
+                new CardInstance(StarterCatalog.Find("48381268")),
+                new CardInstance(StarterCatalog.Find("67270095")),
+                new CardInstance(StarterCatalog.Find("13039848")),
+                new CardInstance(StarterCatalog.Find("63977008"))
+            }.ToList();
+            engine.Human.MonsterZones[0] = celfon;
+            engine.Human.Deck.Clear();
+            engine.Human.Deck.AddRange(topCards);
+
+            Assert.IsTrue(engine.TryActivate(celfon));
+
+            CollectionAssert.AreEqual(topCards, engine.Human.Deck);
+            Assert.AreEqual(1, engine.Human.MonsterZones.Count(card =>
+                card != null && card.Definition.Effect == CardEffect.MorphtronicCelfon));
+        }
+
+        [Test]
+        [CardBehaviorTest("48381268")]
+        public void Morphtronic_Boarden_protects_other_Morphtronics_from_battle_destruction_and_keeps_direct_attacks()
+        {
+            CardInstance ownBoarden = new CardInstance(StarterCatalog.Find("48381268"), true, false);
+            CardInstance directAttacker = new CardInstance(StarterCatalog.Find("93542102"));
+            CardInstance opponentMonster = new CardInstance(StarterCatalog.Find("49003716"));
+            CardInstance defendingBoarden = new CardInstance(StarterCatalog.Find("48381268"), true, false);
+            CardInstance protectedMorphtronic = new CardInstance(StarterCatalog.Find("57108202"));
+            CardDefinition strongDefinition = CreateTestCard(
+                "boarden-strong-attacker", "Strong Attacker", CardKind.Monster, 4, attack: 3000);
+            CardInstance strongAttacker = new CardInstance(strongDefinition);
+            engine.Human.MonsterZones[0] = ownBoarden;
+            engine.Human.MonsterZones[1] = directAttacker;
+            engine.Opponent.MonsterZones[0] = opponentMonster;
+            engine.Opponent.MonsterZones[1] = defendingBoarden;
+            engine.Opponent.MonsterZones[2] = protectedMorphtronic;
+            engine.Human.MonsterZones[2] = strongAttacker;
+            SetTurnNumber(engine, 2);
+            SetPhase(DuelPhase.Battle);
+
+            try
+            {
+                Assert.IsTrue(engine.TryAttack(directAttacker, null));
+                Assert.IsTrue(engine.TryAttack(strongAttacker, protectedMorphtronic));
+
+                Assert.Contains(protectedMorphtronic, engine.Opponent.MonsterZones);
+                Assert.IsFalse(engine.Opponent.Graveyard.Contains(protectedMorphtronic));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(strongDefinition);
+            }
         }
 
         [Test]
@@ -3505,6 +4158,12 @@ namespace DuelPrototype.Tests
         private void InvokeBeginTurn(DuelPlayer player)
         {
             typeof(DuelEngine).GetMethod("BeginTurn", PrivateInstance)
+                .Invoke(engine, new object[] { player });
+        }
+
+        private void InvokeEndTurn(DuelPlayer player)
+        {
+            typeof(DuelEngine).GetMethod("EndTurn", PrivateInstance)
                 .Invoke(engine, new object[] { player });
         }
     }

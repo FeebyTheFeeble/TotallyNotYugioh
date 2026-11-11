@@ -219,6 +219,7 @@ namespace DuelPrototype
             public bool IsDraw;
             public bool IsTributeSummon;
             public bool IsTributedCard;
+            public bool IsDestruction;
             public bool IsSet;
             public int BatchId;
         }
@@ -254,6 +255,8 @@ namespace DuelPrototype
         }
 
         private const string ProfileKey = "DuelPrototype.Profile.v1";
+        private const float CoinSideButtonOffset = 90f;
+        private const float CoinSideButtonSize = 140f;
         private const float BoardCardWidth = 0.052f;
         private const float BoardCardStepX = 0.075f;
         private const float OpponentDeckX = 0.73f;
@@ -305,6 +308,7 @@ namespace DuelPrototype
         private RectTransform sanganPreviewRoot;
         private CardDefinition selectedSynchro;
         private readonly HashSet<CardInstance> selectedMaterials = new HashSet<CardInstance>();
+        private readonly HashSet<CardInstance> selectedPowerToolCards = new HashSet<CardInstance>();
         private List<CardDefinition> lastPack = new List<CardDefinition>();
         private string notice = "";
         private Font font;
@@ -353,6 +357,8 @@ namespace DuelPrototype
             new Dictionary<CardInstance, CardVisualState>();
         private readonly Dictionary<CardInstance, HashSet<CardInstance>> pendingTributeSummons =
             new Dictionary<CardInstance, HashSet<CardInstance>>();
+        private readonly Dictionary<CardInstance, CardVisualState> pendingDestructionStates =
+            new Dictionary<CardInstance, CardVisualState>();
         private readonly HashSet<CardInstance> animatedHandCards = new HashSet<CardInstance>();
         private readonly HashSet<CardInstance> animatingCardArrivals = new HashSet<CardInstance>();
         private Dictionary<CardInstance, CardVisualState> lastCardVisualStates;
@@ -375,6 +381,8 @@ namespace DuelPrototype
         private bool packRevealOpen;
         private bool aiHandsOpen;
         private bool aiAutoplay;
+        private readonly List<DuelStateSnapshot> replayStates = new List<DuelStateSnapshot>();
+        private int replayIndex = -1;
         private float nextAiStepTime;
         private readonly float[] aiAutoplayPaces = { 0f, 5f, 10f, 15f };
         private int aiAutoplayPaceIndex;
@@ -434,10 +442,12 @@ namespace DuelPrototype
             if ((screen == ScreenMode.Duel ||
                  (screen == ScreenMode.TestLab && mockDuelSimulator != null)) &&
                 engine.IsHumanActionWindow && !engine.ResponseWindowOpen && !engine.SearchChoiceOpen &&
+                !engine.QuickdrawDiscardChoiceOpen &&
                 IsAutomaticHumanPhase() &&
                 !IsPresentationInProgress() && Time.unscaledTime >= nextAiStepTime)
             {
                 engine.AdvancePhase();
+                RecordReplayState();
                 nextAiStepTime = Time.unscaledTime + AiCommandDelay;
                 Render();
                 return;
@@ -447,12 +457,14 @@ namespace DuelPrototype
                 engine.CurrentPlayer != engine.Human && engine.HasPendingAiActions;
             bool autoplayAiLab = screen == ScreenMode.AiLab && aiAutoplay && engine.IsAiVsAi;
             if ((!playAiTurn && !autoplayAiLab) || engine.ResponseWindowOpen || engine.SearchChoiceOpen ||
+                engine.QuickdrawDiscardChoiceOpen ||
                 IsPresentationInProgress() || Time.unscaledTime < nextAiStepTime)
                 return;
 
             int previousTurn = engine.TurnNumber;
             if (!engine.StepAiTurn())
                 return;
+            RecordReplayState();
 
             if (engine.Phase == DuelPhase.GameOver)
                 aiAutoplay = false;
@@ -550,6 +562,8 @@ namespace DuelPrototype
             engine = new DuelEngine();
             BindEngineEvents(false);
             engine.StartMatch(deck, StarterCatalog.CreateAiDeck(), humanGoesFirst: humanGoesFirst);
+            ResetReplayHistory();
+            RecordReplayState();
             OnPhaseStarted(engine.Phase);
             ClearSelection();
         }
@@ -607,43 +621,70 @@ namespace DuelPrototype
 
         private IEnumerator AnimateCoinFlip()
         {
-            RectTransform coin = CreateRect("Coin Flip Animation", (RectTransform)canvas.transform);
-            coin.anchorMin = new Vector2(0.5f, 0.5f);
-            coin.anchorMax = new Vector2(0.5f, 0.5f);
-            coin.anchoredPosition = Vector2.zero;
-            coin.sizeDelta = new Vector2(150f, 150f);
-            Image coinImage = coin.gameObject.AddComponent<Image>();
-            coinImage.color = new Color(0.88f, 0.65f, 0.16f);
+            RectTransform selector = CreateRect("Coin Toss Selector", (RectTransform)canvas.transform);
+            selector.anchorMin = new Vector2(0.5f, 0.5f);
+            selector.anchorMax = new Vector2(0.5f, 0.5f);
+            selector.anchoredPosition = Vector2.zero;
+            selector.sizeDelta = new Vector2(360f, 160f);
+            selector.SetAsLastSibling();
 
-            RectTransform inner = CreateRect("Coin Face", coin);
-            SetAnchors(inner, 0.08f, 0.08f, 0.92f, 0.92f);
-            Image innerImage = inner.gameObject.AddComponent<Image>();
-            innerImage.color = new Color(0.96f, 0.78f, 0.31f);
-            RectTransform coinLetterRect = CreateRect("Coin Letter", coin);
-            SetAnchors(coinLetterRect, 0.1f, 0.1f, 0.9f, 0.9f);
-            Text coinLetter = coinLetterRect.gameObject.AddComponent<Text>();
-            coinLetter.font = font;
-            coinLetter.text = "H";
-            coinLetter.fontSize = 72;
-            coinLetter.color = new Color(0.28f, 0.2f, 0.08f);
-            coinLetter.alignment = TextAnchor.MiddleCenter;
-            coinLetter.fontStyle = FontStyle.Bold;
-            coinLetter.raycastTarget = false;
-            coin.SetAsLastSibling();
+            Image[] sideImages = new Image[2];
+            Text[] sideLabels = new Text[2];
+            string[] sideNames = { "HEADS", "TAILS" };
+            Color highlightedColor = new Color(0.9f, 0.66f, 0.2f);
+            Color idleColor = new Color(0.22f, 0.28f, 0.36f);
+            int selectedSide = UnityEngine.Random.Range(0, 2);
 
-            for (int flip = 0; flip < 18; flip++)
+            for (int side = 0; side < sideNames.Length; side++)
             {
-                coinLetter.text = flip % 2 == 0 ? "H" : "T";
-                float scale = Mathf.Max(0.08f, Mathf.Abs(Mathf.Cos((flip + 1) * Mathf.PI * 0.5f)));
-                coin.localScale = new Vector3(scale, 1f, 1f);
-                yield return new WaitForSecondsRealtime(0.055f);
+                RectTransform square = CreateRect(sideNames[side] + " Square", selector);
+                square.anchorMin = new Vector2(0.5f, 0.5f);
+                square.anchorMax = new Vector2(0.5f, 0.5f);
+                square.anchoredPosition = new Vector2(
+                    side == 0 ? -CoinSideButtonOffset : CoinSideButtonOffset, 0f);
+                square.sizeDelta = new Vector2(CoinSideButtonSize, CoinSideButtonSize);
+                sideImages[side] = square.gameObject.AddComponent<Image>();
+
+                RectTransform labelRect = CreateRect(sideNames[side] + " Label", square);
+                SetAnchors(labelRect, 0.04f, 0.04f, 0.96f, 0.96f);
+                sideLabels[side] = labelRect.gameObject.AddComponent<Text>();
+                sideLabels[side].font = font;
+                sideLabels[side].text = sideNames[side];
+                sideLabels[side].fontSize = 22;
+                sideLabels[side].alignment = TextAnchor.MiddleCenter;
+                sideLabels[side].fontStyle = FontStyle.Bold;
+                sideLabels[side].raycastTarget = false;
             }
 
             bool resultHeads = UnityEngine.Random.value < 0.5f;
-            coinLetter.text = resultHeads ? "H" : "T";
-            coin.localScale = Vector3.one;
+            int resultSide = resultHeads ? 0 : 1;
+            int transitions = UnityEngine.Random.Range(18, 25);
+            if ((selectedSide + transitions) % 2 != resultSide)
+                transitions++;
+
+            for (int transition = 0; transition <= transitions; transition++)
+            {
+                if (transition > 0)
+                    selectedSide = 1 - selectedSide;
+
+                for (int side = 0; side < sideImages.Length; side++)
+                {
+                    bool isSelected = side == selectedSide;
+                    sideImages[side].color = isSelected ? highlightedColor : idleColor;
+                    sideLabels[side].color = isSelected ? new Color(0.16f, 0.12f, 0.06f) : Color.white;
+                }
+
+                if (transition == transitions)
+                    break;
+
+                float progress = transition / (float)(transitions - 1);
+                float interval = Mathf.Lerp(0.045f, 0.32f, progress * progress);
+                yield return new WaitForSecondsRealtime(interval);
+            }
+
+            resultHeads = selectedSide == 0;
             yield return new WaitForSecondsRealtime(0.65f);
-            Destroy(coin.gameObject);
+            Destroy(selector.gameObject);
 
             playerWonCoinFlip = resultHeads == playerCalledHeads;
             coinFlipResolved = true;
@@ -744,11 +785,94 @@ namespace DuelPrototype
             engine = new DuelEngine();
             engine.StartMatch(first.MainDeck.Concat(first.ExtraDeck).ToList(),
                 second.MainDeck.Concat(second.ExtraDeck).ToList(), true, first.Name, second.Name);
+            ResetReplayHistory();
+            RecordReplayState();
             aiAutoplay = true;
             nextAiStepTime = Time.unscaledTime + AiCommandDelay;
             ClearSelection();
             screen = ScreenMode.AiLab;
             Render();
+        }
+
+        private void SimulateAiLabDuel()
+        {
+            IReadOnlyList<StructureDeckPreset> decks = StarterCatalog.StructureDecks;
+            if (decks.Count < 2)
+                return;
+
+            StructureDeckPreset first = decks[firstAiDeckIndex];
+            StructureDeckPreset second = decks[secondAiDeckIndex];
+            DuelEngine replayEngine = new DuelEngine();
+            replayEngine.StartMatch(first.MainDeck.Concat(first.ExtraDeck).ToList(),
+                second.MainDeck.Concat(second.ExtraDeck).ToList(), true, first.Name, second.Name);
+
+            List<DuelStateSnapshot> history =
+                new List<DuelStateSnapshot> { replayEngine.CaptureStateForReplay() };
+            while (replayEngine.Phase != DuelPhase.GameOver)
+            {
+                if (!replayEngine.StepAiTurn())
+                    break;
+                history.Add(replayEngine.CaptureStateForReplay());
+            }
+
+            replayStates.Clear();
+            replayStates.AddRange(history);
+            replayIndex = Mathf.Max(0, replayStates.Count - 1);
+            engine = replayEngine;
+            aiAutoplay = false;
+            screen = ScreenMode.AiLab;
+            Render();
+        }
+
+        private void ResetReplayHistory()
+        {
+            replayStates.Clear();
+            replayIndex = -1;
+        }
+
+        private void RecordReplayState()
+        {
+            if (engine == null || engine.ResponseWindowOpen ||
+                engine.ResponseDiscardChoiceOpen || engine.SearchChoiceOpen)
+                return;
+
+            replayStates.Add(engine.CaptureStateForReplay());
+            replayIndex = replayStates.Count - 1;
+        }
+
+        private void RestoreReplayState(int index)
+        {
+            if (replayStates.Count == 0)
+                return;
+
+            replayIndex = Mathf.Clamp(index, 0, replayStates.Count - 1);
+            engine = DuelEngine.RestoreState(replayStates[replayIndex]);
+            aiAutoplay = false;
+            ClearSelection();
+            Render();
+        }
+
+        private void ReplayToStart()
+        {
+            RestoreReplayState(0);
+        }
+
+        private void ReplayToEnd()
+        {
+            if (replayStates.Count > 0)
+                RestoreReplayState(replayStates.Count - 1);
+        }
+
+        private void ReplayStepBack()
+        {
+            if (replayIndex > 0)
+                RestoreReplayState(replayIndex - 1);
+        }
+
+        private void ReplayStepForward()
+        {
+            if (replayIndex < replayStates.Count - 1)
+                RestoreReplayState(replayIndex + 1);
         }
 
         private void BuildCanvas()
@@ -929,9 +1053,15 @@ namespace DuelPrototype
                 DrawExtraDeckOverlay();
             if (screen == ScreenMode.Duel && engine != null && engine.Phase == DuelPhase.GameOver)
                 DrawDuelResultsOverlay();
+            if ((screen == ScreenMode.Duel || screen == ScreenMode.AiLab) && replayStates.Count > 0)
+                DrawReplayControls();
             if (engine != null && engine.SearchChoiceOpen &&
                 (screen == ScreenMode.Duel || screen == ScreenMode.TestLab))
                 DrawSanganSearchOverlay();
+            if (engine != null && engine.PowerToolChoiceOpen && screen == ScreenMode.Duel)
+                DrawPowerToolChoiceOverlay();
+            if (engine != null && engine.QuickdrawDiscardChoiceOpen && screen == ScreenMode.Duel)
+                DrawQuickdrawDiscardOverlay();
             if (forfeitConfirmOpen && screen == ScreenMode.Duel && engine != null)
                 DrawForfeitConfirmationOverlay();
             if (pendingTributeSummonCard != null && screen == ScreenMode.Duel && engine != null)
@@ -950,6 +1080,7 @@ namespace DuelPrototype
                 observedEngine.AttackDeclared -= OnAttackDeclared;
                 observedEngine.CardDrawn -= OnCardDrawn;
                 observedEngine.TributeSummoned -= OnTributeSummoned;
+                observedEngine.MonsterDestroyed -= OnMonsterDestroyed;
             }
 
             observedEngine = engine;
@@ -957,6 +1088,7 @@ namespace DuelPrototype
             pendingDrawnCardStates.Clear();
             pendingHandLayoutStarts.Clear();
             pendingTributeSummons.Clear();
+            pendingDestructionStates.Clear();
             animatedHandCards.Clear();
             animatingCardArrivals.Clear();
             if (observedEngine == null)
@@ -966,6 +1098,7 @@ namespace DuelPrototype
             observedEngine.AttackDeclared += OnAttackDeclared;
             observedEngine.CardDrawn += OnCardDrawn;
             observedEngine.TributeSummoned += OnTributeSummoned;
+            observedEngine.MonsterDestroyed += OnMonsterDestroyed;
             if (showCurrentPhase)
                 OnPhaseStarted(observedEngine.Phase);
         }
@@ -1014,11 +1147,46 @@ namespace DuelPrototype
 
             int batchId = ++cardVisualBatchId;
             Dictionary<CardInstance, CardVisualState> currentStates = CaptureCardVisualStates();
+            HashSet<CardInstance> destructionCards = new HashSet<CardInstance>();
+            foreach (KeyValuePair<CardInstance, CardVisualState> entry in pendingDestructionStates)
+            {
+                if (entry.Value.Zone != CardVisualZone.Monster)
+                    continue;
+
+                CardInstance card = entry.Key;
+                bool reachedGraveyardOrBanished =
+                    currentStates.TryGetValue(card, out CardVisualState destination) &&
+                    (destination.Zone == CardVisualZone.Graveyard ||
+                     destination.Zone == CardVisualZone.Banished);
+                bool leftField = !currentStates.ContainsKey(card);
+                if (!reachedGraveyardOrBanished && !leftField)
+                    continue;
+
+                destructionCards.Add(card);
+                Vector2 from = GetCardVisualPosition(entry.Value);
+                cardAnimationQueue.Enqueue(new CardMovementAnimation
+                {
+                    Card = card,
+                    From = from,
+                    To = reachedGraveyardOrBanished ? GetCardVisualPosition(destination) : from,
+                    StartSize = GetCardVisualSize(entry.Value),
+                    EndSize = reachedGraveyardOrBanished ? GetCardVisualSize(destination) :
+                        GetCardVisualSize(entry.Value),
+                    StartsFaceUp = CardIsVisible(entry.Value),
+                    EndsFaceUp = reachedGraveyardOrBanished && CardIsVisible(destination),
+                    IsDestruction = true,
+                    BatchId = batchId
+                });
+            }
+
             if (lastCardVisualStates != null || pendingHandLayoutStarts.Count > 0)
             {
                 foreach (KeyValuePair<CardInstance, CardVisualState> entry in currentStates)
                 {
                     CardInstance card = entry.Key;
+                    if (destructionCards.Contains(card))
+                        continue;
+
                     CardVisualState previous = null;
                     bool hasPrevious = lastCardVisualStates != null &&
                         lastCardVisualStates.TryGetValue(card, out previous);
@@ -1059,10 +1227,11 @@ namespace DuelPrototype
                     if (!zoneChanged && !showPopup && !revealed && !handLayoutChanged)
                         continue;
 
-                    if (zoneChanged && IsBoardZone(current.Zone))
+                    if ((zoneChanged && IsBoardZone(current.Zone)) ||
+                        (revealed && current.Zone == CardVisualZone.Monster))
                         animatingCardArrivals.Add(card);
                     bool isTributeSummon = pendingTributeSummons.ContainsKey(card);
-                    QueueCardAnimation(new CardMovementAnimation
+                    cardAnimationQueue.Enqueue(new CardMovementAnimation
                     {
                         Card = card,
                         From = GetCardVisualPosition(movementStart),
@@ -1091,7 +1260,9 @@ namespace DuelPrototype
             pendingDrawnCardStates.Clear();
             pendingHandLayoutStarts.Clear();
             pendingTributeSummons.Clear();
+            pendingDestructionStates.Clear();
             lastCardVisualStates = currentStates;
+            TryStartNextPresentation();
         }
 
         private CardVisualState CreateDeckVisualState(DuelPlayer owner)
@@ -1259,14 +1430,6 @@ namespace DuelPrototype
             return new Vector2(BoardCardWidth * canvasRect.width, BoardCardHeight * canvasRect.height);
         }
 
-        private void QueueCardAnimation(CardMovementAnimation animation)
-        {
-            if (canvas == null)
-                return;
-            cardAnimationQueue.Enqueue(animation);
-            TryStartNextPresentation();
-        }
-
         private void OnCardDrawn(DuelPlayer owner, CardInstance card)
         {
             if (owner == null || card == null)
@@ -1317,12 +1480,45 @@ namespace DuelPrototype
             pendingTributeSummons[summonedCard] = new HashSet<CardInstance>(tributes);
         }
 
+        private void OnMonsterDestroyed(DuelPlayer owner, CardInstance monster)
+        {
+            if (owner == null || monster == null || engine == null)
+                return;
+
+            Dictionary<CardInstance, CardVisualState> states = CaptureCardVisualStates();
+            if (states.TryGetValue(monster, out CardVisualState state) &&
+                state.Zone == CardVisualZone.Monster)
+                pendingDestructionStates[monster] = state;
+        }
+
         private IEnumerator PlayCardAnimations()
         {
-            yield return null;
             while (cardAnimationQueue.Count > 0)
             {
                 CardMovementAnimation animation = cardAnimationQueue.Dequeue();
+                if (animation.IsDestruction)
+                {
+                    List<CardMovementAnimation> destroyedCards = new List<CardMovementAnimation>
+                    {
+                        animation
+                    };
+                    int queuedCount = cardAnimationQueue.Count;
+                    Queue<CardMovementAnimation> laterAnimations = new Queue<CardMovementAnimation>();
+                    for (int i = 0; i < queuedCount; i++)
+                    {
+                        CardMovementAnimation queued = cardAnimationQueue.Dequeue();
+                        if (queued.IsDestruction && queued.BatchId == animation.BatchId)
+                            destroyedCards.Add(queued);
+                        else
+                            laterAnimations.Enqueue(queued);
+                    }
+                    while (laterAnimations.Count > 0)
+                        cardAnimationQueue.Enqueue(laterAnimations.Dequeue());
+
+                    yield return PlayDestructionAnimations(destroyedCards);
+                    continue;
+                }
+
                 bool coordinatedBatch = animation.BatchId != 0 &&
                     (animation.IsDraw || animation.IsHandDeparture || animation.IsTributeSummon ||
                      cardAnimationQueue.Any(item => item.BatchId == animation.BatchId &&
@@ -1554,6 +1750,25 @@ namespace DuelPrototype
             }
         }
 
+        private IEnumerator PlayDestructionAnimations(List<CardMovementAnimation> destroyedCards)
+        {
+            List<RectTransform> visuals = destroyedCards.Select(item =>
+                CreateAnimatedCard(item.Card.Definition, item.StartsFaceUp, item.From, item.StartSize))
+                .ToList();
+
+            yield return PlayTributeDeathPulses(destroyedCards);
+
+            for (int i = 0; i < destroyedCards.Count; i++)
+            {
+                if (!destroyedCards[i].StartsFaceUp)
+                    yield return FlipAnimatedCard(visuals[i], true);
+            }
+
+            yield return TweenCardGroup(visuals, destroyedCards, 0.38f);
+            foreach (RectTransform visual in visuals)
+                Destroy(visual.gameObject);
+        }
+
         private IEnumerator PlayTributeSummonAnimation(
             CardMovementAnimation summonedCard,
             List<CardMovementAnimation> batch,
@@ -1761,6 +1976,12 @@ namespace DuelPrototype
             RectTransform visual = CreateAnimatedCard(animation.Card.Definition,
                 animation.IsSet ? false : animation.StartsFaceUp,
                 animation.From, animation.StartSize);
+            bool flipBeforeMovement = !animation.ShowPopup && !animation.IsSet &&
+                                     animation.StartsFaceUp != animation.EndsFaceUp &&
+                                     animation.EndsFaceUp;
+            if (flipBeforeMovement)
+                yield return FlipAnimatedCard(visual, true);
+
             if (animation.ShowPopup && !animation.IsSet)
             {
                 yield return TweenCardVisual(visual, animation.From, new Vector2(0.5f, 0.5f),
@@ -1781,7 +2002,7 @@ namespace DuelPrototype
                         animation.StartSize, animation.EndSize, 0.42f);
                 if (animation.IsSet)
                     visual.localRotation = Quaternion.Euler(0f, 0f, 90f);
-                else if (animation.StartsFaceUp != animation.EndsFaceUp)
+                else if (!flipBeforeMovement && animation.StartsFaceUp != animation.EndsFaceUp)
                     yield return FlipAnimatedCard(visual, animation.EndsFaceUp);
             }
 
@@ -2172,6 +2393,7 @@ namespace DuelPrototype
             DrawActionBar();
             DrawExtraDeck();
             DrawHand();
+            DrawSynchroMaterialPrompt();
             DrawDuelLog();
 
 
@@ -2195,10 +2417,12 @@ namespace DuelPrototype
                     0.25f, 0.59f, 0.75f, 0.65f, 16, Color.white, TextAnchor.MiddleCenter);
                 if (!coinFlipInProgress)
                 {
-                    AddButton(contentRoot, "HEADS", 0.31f, 0.43f, 0.48f, 0.52f,
-                        new Color(0.78f, 0.58f, 0.16f), () => CallCoinSide(true), 15);
-                    AddButton(contentRoot, "TAILS", 0.52f, 0.43f, 0.69f, 0.52f,
-                        new Color(0.34f, 0.4f, 0.52f), () => CallCoinSide(false), 15);
+                    AddCenteredButton(contentRoot, "HEADS", -CoinSideButtonOffset,
+                        CoinSideButtonSize, new Color(0.78f, 0.58f, 0.16f),
+                        () => CallCoinSide(true), 22);
+                    AddCenteredButton(contentRoot, "TAILS", CoinSideButtonOffset,
+                        CoinSideButtonSize, new Color(0.34f, 0.4f, 0.52f),
+                        () => CallCoinSide(false), 22);
                     AddButton(contentRoot, "CANCEL", 0.4f, 0.31f, 0.6f, 0.38f,
                         new Color(0.25f, 0.29f, 0.34f), () =>
                         {
@@ -2343,7 +2567,10 @@ namespace DuelPrototype
             {
                 case DuelPhase.Draw: return "GO TO STANDBY PHASE";
                 case DuelPhase.Standby: return "GO TO MAIN PHASE I";
-                case DuelPhase.MainOne: return "GO TO BATTLE PHASE";
+                case DuelPhase.MainOne:
+                    return engine.Human.BattlePhaseSkippedTurn == engine.TurnNumber
+                        ? "SKIP BATTLE — GO TO MAIN 2"
+                        : "GO TO BATTLE PHASE";
                 case DuelPhase.Battle: return "GO TO MAIN PHASE II";
                 case DuelPhase.MainTwo: return "GO TO END PHASE";
                 case DuelPhase.End: return "GO TO DRAW PHASE";
@@ -2353,6 +2580,11 @@ namespace DuelPrototype
 
         private void DrawResponseWindow()
         {
+            if (engine.DustTornadoTargetChoiceOpen)
+            {
+                DrawDustTornadoResponseOverlay();
+                return;
+            }
             AddPanel(contentRoot, 0, 0.09f, 1, 0.9f, new Color(0.01f, 0.02f, 0.035f, 0.82f));
             AddPanel(contentRoot, 0.2f, 0.19f, 0.8f, 0.81f, new Color(0.07f, 0.1f, 0.15f));
             AddText(contentRoot, "CHAIN RESPONSE", 0.24f, 0.72f, 0.76f, 0.79f, 22,
@@ -2372,6 +2604,8 @@ namespace DuelPrototype
                     0.28f, top - 0.06f, 0.72f, top, CardFrameColor(trap.Definition),
                     () =>
                     {
+                        if (trap.Definition.Effect == CardEffect.DustTornado)
+                            selectedTarget = null;
                         engine.TryRespondWithTrap(trap);
                         Render();
                     }, 14, trap.Definition);
@@ -2383,6 +2617,144 @@ namespace DuelPrototype
                     engine.PassResponseWindow();
                     Render();
                 }, 13);
+        }
+
+        private void DrawPowerToolChoiceOverlay()
+        {
+                IReadOnlyList<CardInstance> choices = engine.AvailablePowerToolCards;
+                AddPanel(contentRoot, 0, 0.09f, 1, 0.9f, new Color(0.01f, 0.02f, 0.035f, 0.9f));
+                AddPanel(contentRoot, 0.12f, 0.15f, 0.88f, 0.85f, panelColor);
+                AddText(contentRoot, "POWER TOOL DRAGON — SELECT 3 EQUIP SPELLS",
+                    0.18f, 0.76f, 0.82f, 0.82f, 19, accentColor, TextAnchor.MiddleCenter, true);
+                AddText(contentRoot, "Your opponent will randomly add 1 revealed card to your hand.",
+                    0.18f, 0.7f, 0.82f, 0.75f, 13, Color.white, TextAnchor.MiddleCenter);
+
+                for (int i = 0; i < choices.Count; i++)
+                {
+                    CardInstance choice = choices[i];
+                    int column = i % 2;
+                    int row = i / 2;
+                    float x = column == 0 ? 0.18f : 0.51f;
+                    float top = 0.65f - row * 0.065f;
+                    bool selected = selectedPowerToolCards.Contains(choice);
+                    AddButton(contentRoot,
+                        (selected ? "✓  " : "") + choice.Definition.DisplayName,
+                        x, top - 0.052f, x + 0.31f, top,
+                        selected ? new Color(0.12f, 0.52f, 0.43f) : CardFrameColor(choice.Definition),
+                        () =>
+                        {
+                            if (selectedPowerToolCards.Contains(choice))
+                                selectedPowerToolCards.Remove(choice);
+                            else if (selectedPowerToolCards.Count < 3)
+                                selectedPowerToolCards.Add(choice);
+                            Render();
+                        }, 11, choice.Definition);
+                }
+
+                bool canConfirm = selectedPowerToolCards.Count == 3;
+                AddButton(contentRoot, "REVEAL SELECTED (" + selectedPowerToolCards.Count + "/3)",
+                    0.32f, 0.19f, 0.68f, 0.26f,
+                    canConfirm ? accentColor : new Color(0.2f, 0.25f, 0.31f),
+                    () =>
+                    {
+                        if (!canConfirm)
+                            return;
+                        if (engine.TryChoosePowerToolCards(selectedPowerToolCards.ToList()))
+                            selectedPowerToolCards.Clear();
+                        Render();
+                    }, 12);
+        }
+
+        private void DrawQuickdrawDiscardOverlay()
+        {
+            IReadOnlyList<CardInstance> choices = engine.AvailableQuickdrawDiscards;
+            AddPanel(contentRoot, 0, 0.09f, 1, 0.9f, new Color(0.01f, 0.02f, 0.035f, 0.9f));
+            AddPanel(contentRoot, 0.12f, 0.15f, 0.88f, 0.85f, panelColor);
+            AddText(contentRoot, "QUICKDRAW SYNCHRON — CHOOSE A MONSTER TO DISCARD",
+                0.17f, 0.76f, 0.83f, 0.82f, 18, accentColor, TextAnchor.MiddleCenter, true);
+
+            for (int i = 0; i < choices.Count; i++)
+            {
+                CardInstance choice = choices[i];
+                int column = i % 2;
+                int row = i / 2;
+                float x = column == 0 ? 0.18f : 0.51f;
+                float top = 0.67f - row * 0.09f;
+                AddButton(contentRoot, "DISCARD " + choice.Definition.DisplayName,
+                    x, top - 0.07f, x + 0.31f, top, CardFrameColor(choice.Definition),
+                    () =>
+                    {
+                        if (engine.TryChooseQuickdrawDiscard(choice))
+                            RecordReplayState();
+                        Render();
+                    }, 11, choice.Definition);
+            }
+
+            AddButton(contentRoot, "CANCEL",
+                0.39f, 0.19f, 0.61f, 0.26f, new Color(0.25f, 0.29f, 0.34f),
+                () =>
+                {
+                    engine.CancelQuickdrawDiscardChoice();
+                    Render();
+                }, 11);
+        }
+
+        private void DrawDustTornadoResponseOverlay()
+        {
+                AddPanel(contentRoot, 0, 0.09f, 1, 0.9f, new Color(0.01f, 0.02f, 0.035f, 0.9f));
+                AddPanel(contentRoot, 0.12f, 0.15f, 0.88f, 0.85f, panelColor);
+                AddText(contentRoot, "DUST TORNADO — TARGET AN OPPONENT'S SPELL/TRAP",
+                    0.17f, 0.76f, 0.83f, 0.82f, 18, accentColor, TextAnchor.MiddleCenter, true);
+                IReadOnlyList<CardInstance> targets = engine.AvailableDustTornadoTargets;
+                for (int i = 0; i < targets.Count; i++)
+                {
+                    CardInstance target = targets[i];
+                    float top = 0.68f - i * 0.07f;
+                    AddButton(contentRoot,
+                        target.FaceUp ? target.Definition.DisplayName : "SET CARD",
+                        0.18f, top - 0.055f, 0.48f, top,
+                        CardFrameColor(target.Definition),
+                        () =>
+                        {
+                            selectedTarget = target;
+                            Render();
+                        }, 11,
+                        target.FaceUp ? target.Definition : null);
+                }
+                bool hasTarget = selectedTarget != null && targets.Contains(selectedTarget);
+                if (hasTarget)
+                    AddButton(contentRoot, "DESTROY SELECTED — NO SET",
+                        0.18f, 0.2f, 0.48f, 0.27f, accentColor,
+                        () => ResolveDustTornadoResponse(selectedTarget, null), 11);
+                IReadOnlyList<CardInstance> setCards = engine.AvailableDustTornadoSetCards;
+                for (int i = 0; hasTarget && i < setCards.Count; i++)
+                {
+                    CardInstance card = setCards[i];
+                    float top = 0.68f - i * 0.07f;
+                    AddButton(contentRoot, "SET " + card.Definition.DisplayName,
+                        0.52f, top - 0.055f, 0.82f, top,
+                        CardFrameColor(card.Definition),
+                        () => ResolveDustTornadoResponse(selectedTarget, card), 10, card.Definition);
+                }
+                AddButton(contentRoot, "CANCEL DUST TORNADO",
+                    0.33f, 0.18f, 0.67f, 0.25f, new Color(0.32f, 0.2f, 0.23f),
+                    () =>
+                    {
+                        selectedTarget = null;
+                        engine.CancelDustTornadoTargetChoice();
+                        Render();
+                    }, 12);
+                AddText(contentRoot, "Choose a target on the left. Choose a card on the right to Set it, or skip the Set.",
+                    0.17f, 0.29f, 0.83f, 0.34f, 11, mutedColor, TextAnchor.MiddleCenter);
+        }
+
+        private void ResolveDustTornadoResponse(CardInstance target, CardInstance cardToSet)
+        {
+                if (target == null)
+                    return;
+                engine.TryRespondWithDustTornado(target, cardToSet);
+                selectedTarget = null;
+                Render();
         }
 
         private void DrawSanganSearchOverlay()
@@ -2456,6 +2828,14 @@ namespace DuelPrototype
                         Render();
                     }
                 }, 13);
+            if (engine.SearchChoiceOptional)
+                AddButton(contentRoot, "SKIP OPTIONAL SEARCH", 0.17f, 0.17f, 0.47f, 0.23f,
+                    new Color(0.2f, 0.34f, 0.46f), () =>
+                    {
+                        engine.TrySkipSearchChoice();
+                        selectedSanganSearchCard = null;
+                        Render();
+                    }, 12);
         }
 
         private void ConfigureMouseWheelScrolling(ScrollRect scroll)
@@ -2657,6 +3037,7 @@ namespace DuelPrototype
                     () => OnZoneClicked(card, opponent), 11,
                     displayedCard != null && (!opponent || displayedCard.FaceUp)
                         ? displayedCard.Definition : null);
+                AddSynchroMaterialHighlight(slot, displayedCard, opponent);
                 if (!opponent)
                     ConfigureCardDropTarget(slot, draggedCard => HandleMonsterZoneDrop(draggedCard, zoneIndex));
                 AddCardArtPlaceholder(slot,
@@ -2665,6 +3046,25 @@ namespace DuelPrototype
                 RotateDefenseMonster(slot, displayedCard);
                 FitMonsterSlotStats(slot, displayedCard);
             }
+        }
+
+        private void AddSynchroMaterialHighlight(
+            RectTransform slot,
+            CardInstance card,
+            bool opponent)
+        {
+            if (opponent || card == null || !card.FaceUp ||
+                selectedSynchro == null || selectedSynchro.Kind != CardKind.Synchro ||
+                (engine.Phase != DuelPhase.MainOne && engine.Phase != DuelPhase.MainTwo))
+                return;
+
+            if (!selectedMaterials.Contains(card))
+                return;
+
+            Outline outline = slot.gameObject.AddComponent<Outline>();
+            outline.effectColor = new Color(1f, 0.82f, 0.28f);
+            outline.effectDistance = new Vector2(4f, 4f);
+            outline.useGraphicAlpha = false;
         }
 
         private void DrawSpellTrapRow(CardInstance[] zones, float y)
@@ -3172,6 +3572,16 @@ namespace DuelPrototype
                     selectedAttacker = null;
                     selectedTarget = null;
                 }
+                else if (IsSelectingSilverwindTargets())
+                {
+                    if (selectedMaterials.Contains(card))
+                        selectedMaterials.Remove(card);
+                    else if (selectedMaterials.Count < 2)
+                        selectedMaterials.Add(card);
+                    else
+                        notice = "Silverwind can select up to two monsters.";
+                    selectedTarget = null;
+                }
                 else
                     selectedTarget = card;
             }
@@ -3193,15 +3603,23 @@ namespace DuelPrototype
                 if (!selectedMaterials.Add(card))
                     selectedMaterials.Remove(card);
                 selectedMonsterCard = null;
-                if (engine.IsHumanActionWindow && engine.CanSynchroSummon(
-                        selectedSynchro, selectedMaterials.ToList(), engine.Human))
-                {
-                    CardDefinition synchro = selectedSynchro;
-                    List<CardInstance> materials = selectedMaterials.ToList();
-                    Act(() => engine.TrySynchroSummon(synchro, materials));
-                    return;
-                }
-                notice = "";
+                notice = GetSynchroMaterialSummary();
+            }
+            else if (IsSelectingSilverwindTargets())
+            {
+                if (selectedMaterials.Contains(card))
+                    selectedMaterials.Remove(card);
+                else if (selectedMaterials.Count < 2)
+                    selectedMaterials.Add(card);
+                else
+                    notice = "Silverwind can select up to two monsters.";
+                selectedTarget = null;
+            }
+            else if (card.Definition.Effect == CardEffect.BlackwingSilverwind)
+            {
+                selectedMonsterCard = card;
+                selectedMaterials.Clear();
+                selectedTarget = null;
             }
             else
             {
@@ -3210,6 +3628,15 @@ namespace DuelPrototype
                     selectedMaterials.Remove(card);
             }
             Render();
+        }
+
+        private bool IsSelectingSilverwindTargets()
+        {
+            return selectedMonsterCard != null &&
+                selectedMonsterCard.Definition.Effect == CardEffect.BlackwingSilverwind &&
+                selectedMonsterCard.SummonedTurnNumber == engine.TurnNumber &&
+                engine.Human.MonsterZones.Contains(selectedMonsterCard) &&
+                (engine.Phase == DuelPhase.MainOne || engine.Phase == DuelPhase.MainTwo);
         }
 
         private void OnSpellTrapZoneClicked(CardInstance card)
@@ -3245,7 +3672,31 @@ namespace DuelPrototype
             float actionX = 0.03f;
             if (engine.Phase == DuelPhase.MainOne || engine.Phase == DuelPhase.MainTwo)
             {
-                if (selectedRitualMonster != null)
+                if (selectedSynchro != null && selectedSynchro.Kind == CardKind.Synchro)
+                {
+                    bool canSummon = engine.IsHumanActionWindow &&
+                        engine.CanSynchroSummon(selectedSynchro, selectedMaterials.ToList(), engine.Human);
+                    AddContextAction(ref actionX,
+                        canSummon ? "SYNCHRO SUMMON" : "SELECT MATERIALS",
+                        canSummon ? accentColor : new Color(0.2f, 0.25f, 0.31f),
+                        canSummon
+                            ? () =>
+                            {
+                                CardDefinition synchro = selectedSynchro;
+                                List<CardInstance> materials = selectedMaterials.ToList();
+                                Act(() => engine.TrySynchroSummon(synchro, materials));
+                            }
+                            : () => { });
+                    AddContextAction(ref actionX, "CANCEL",
+                        new Color(0.32f, 0.2f, 0.23f), () =>
+                        {
+                            selectedSynchro = null;
+                            selectedMaterials.Clear();
+                            notice = "";
+                            Render();
+                        });
+                }
+                else if (selectedRitualMonster != null)
                 {
                     if (engine.Human.Hand.Any(card => card.Definition.Kind == CardKind.Spell &&
                                                       card.Definition.Subtype == CardSubtype.Ritual))
@@ -3257,6 +3708,13 @@ namespace DuelPrototype
                 }
                 else if (selectedHandCard != null && selectedHandCard.Definition.IsMonster)
                 {
+                    if (selectedMonsterCard != null &&
+                        selectedMonsterCard.Definition.Effect == CardEffect.AncientFairyDragon &&
+                        selectedHandCard.Definition.Level <= 4)
+                        AddContextAction(ref actionX, "ANCIENT FAIRY: SPECIAL SUMMON",
+                            accentColor, () => Act(() =>
+                                engine.TryActivateAncientFairyDragonSummon(
+                                    selectedMonsterCard, selectedHandCard)));
                     if (!selectedHandCard.Definition.CanNormalSummon)
                     {
                         AddContextAction(ref actionX, "SPECIAL SUMMON REQUIRED",
@@ -3270,6 +3728,10 @@ namespace DuelPrototype
                     }
                     else
                     {
+                        if (selectedHandCard.Definition.Effect == CardEffect.QuickdrawSynchron)
+                            AddContextAction(ref actionX, "SPECIAL SUMMON", accentColor, () => Act(() =>
+                                engine.TryActivate(selectedHandCard)));
+
                         int tributeCount = selectedHandCard.Definition.Level >= 7 ? 2 : selectedHandCard.Definition.Level >= 5 ? 1 : 0;
                         string summonLabel = tributeCount == 0 ? "NORMAL SUMMON" : "TRIBUTE SUMMON (" + tributeCount + ")";
                         AddContextAction(ref actionX, summonLabel, accentColor, () => Act(() =>
@@ -3331,7 +3793,19 @@ namespace DuelPrototype
 
                 if (selectedHandCard == null && selectedMonsterCard != null && selectedMonsterCard.FaceUp)
                 {
-                    if (selectedMonsterCard.Definition.Effect != CardEffect.None)
+                    if (selectedMonsterCard.Definition.Effect == CardEffect.AncientFairyDragon)
+                        AddContextAction(ref actionX, "DESTROY FIELD SPELLS + GAIN 1000 LP",
+                            accentColor, () => Act(() =>
+                                engine.TryActivateAncientFairyDragonFieldEffect(selectedMonsterCard)));
+                    if (selectedMonsterCard.Definition.Effect == CardEffect.BlackwingSilverwind &&
+                        selectedMonsterCard.SummonedTurnNumber == engine.TurnNumber)
+                        AddContextAction(ref actionX, "SILVERWIND: DESTROY SELECTED (" +
+                            selectedMaterials.Count + "/2)",
+                            selectedMaterials.Count <= 2 ? accentColor : new Color(0.2f, 0.25f, 0.31f),
+                            () => Act(() => engine.TryActivateBlackwingSilverwind(
+                                selectedMonsterCard, selectedMaterials.ToList())));
+                    else if (selectedMonsterCard.Definition.Effect != CardEffect.None &&
+                             selectedMonsterCard.Definition.Effect != CardEffect.AncientFairyDragon)
                         AddContextAction(ref actionX, "ACTIVATE EFFECT", new Color(0.2f, 0.34f, 0.46f), () => Act(() =>
                             engine.TryActivate(selectedMonsterCard, selectedMonsterCard)));
                     AddContextAction(ref actionX, "CHANGE POSITION", new Color(0.2f, 0.34f, 0.46f), () => Act(() =>
@@ -3506,7 +3980,8 @@ namespace DuelPrototype
                         }
                         extraDeckOpen = false;
                         notice = definition.Kind == CardKind.Synchro
-                            ? "Select a face-up Tuner and non-Tuner materials on your field."
+                            ? "Select face-up field monsters: 1 Tuner + 1 or more non-Tuners totaling Level " +
+                              definition.Level + ". Selected materials will be outlined in gold."
                             : "";
                         Render();
                     }, 10, definition);
@@ -3598,10 +4073,16 @@ namespace DuelPrototype
                             Render();
                             return;
                         }
+                        CardInstance ancientFairySource =
+                            selectedMonsterCard != null &&
+                            selectedMonsterCard.Definition.Effect == CardEffect.AncientFairyDragon
+                                ? selectedMonsterCard
+                                : null;
                         selectedHandCard = card;
                         selectedTarget = null;
                         notice = "";
-                        selectedMonsterCard = null;
+                        if (ancientFairySource == null)
+                            selectedMonsterCard = null;
                         if (card.Definition.Effect != CardEffect.FusionSummon)
                         {
                             selectedSynchro = null;
@@ -3623,6 +4104,30 @@ namespace DuelPrototype
                 SetAnchors(label.rectTransform, 0.02f, 0.02f, 0.98f, 0.28f);
                 label.alignment = TextAnchor.MiddleCenter;
             }
+        }
+
+        private void DrawReplayControls()
+        {
+            if (replayStates.Count == 0 || (screen != ScreenMode.Duel && screen != ScreenMode.AiLab))
+                return;
+
+            bool atStart = replayIndex <= 0;
+            bool atEnd = replayIndex >= replayStates.Count - 1;
+            AddPanel(contentRoot, 0.75f, 0.015f, 0.995f, 0.12f, new Color(0.04f, 0.08f, 0.12f, 0.9f));
+            AddText(contentRoot, "REPLAY " + (replayIndex + 1) + " / " + replayStates.Count,
+                0.76f, 0.065f, 0.985f, 0.11f, 9, mutedColor, TextAnchor.MiddleCenter, true);
+            AddButton(contentRoot, "|<", 0.76f, 0.02f, 0.81f, 0.055f,
+                atStart ? new Color(0.25f, 0.29f, 0.34f) : new Color(0.15f, 0.28f, 0.38f),
+                () => { if (!atStart) ReplayToStart(); }, 10);
+            AddButton(contentRoot, "<", 0.815f, 0.02f, 0.865f, 0.055f,
+                atStart ? new Color(0.25f, 0.29f, 0.34f) : new Color(0.15f, 0.22f, 0.31f),
+                () => { if (!atStart) ReplayStepBack(); }, 10);
+            AddButton(contentRoot, ">", 0.87f, 0.02f, 0.92f, 0.055f,
+                atEnd ? new Color(0.25f, 0.29f, 0.34f) : new Color(0.15f, 0.22f, 0.31f),
+                () => { if (!atEnd) ReplayStepForward(); }, 10);
+            AddButton(contentRoot, ">|", 0.925f, 0.02f, 0.98f, 0.055f,
+                atEnd ? new Color(0.25f, 0.29f, 0.34f) : new Color(0.15f, 0.28f, 0.38f),
+                () => { if (!atEnd) ReplayToEnd(); }, 10);
         }
 
         private void DrawDuelLog()
@@ -3659,6 +4164,43 @@ namespace DuelPrototype
                 AddText(contentRoot, notice, 0.025f, 0.005f, 0.98f, 0.035f, 12, new Color(1f, 0.78f, 0.35f), TextAnchor.MiddleLeft);
                 return;
             }
+        }
+
+        private void DrawSynchroMaterialPrompt()
+        {
+            if (selectedSynchro == null || selectedSynchro.Kind != CardKind.Synchro ||
+                (engine.Phase != DuelPhase.MainOne && engine.Phase != DuelPhase.MainTwo))
+                return;
+
+            RectTransform panel = AddPanel(contentRoot, 0.22f, 0.905f, 0.82f, 0.99f,
+                new Color(0.035f, 0.12f, 0.16f, 0.96f));
+            panel.GetComponent<Image>().raycastTarget = false;
+            AddText(contentRoot,
+                "SYNCHRO MATERIALS  •  " + selectedSynchro.DisplayName + "  (LEVEL " +
+                selectedSynchro.Level + ")",
+                0.235f, 0.95f, 0.805f, 0.985f, 14, new Color(1f, 0.82f, 0.28f),
+                TextAnchor.MiddleCenter, true);
+            AddText(contentRoot,
+                "Click face-up field monsters to add/remove: exactly 1 Tuner + 1+ non-Tuners. " +
+                "Gold outline = selected. " +
+                GetSynchroMaterialSummary(),
+                0.235f, 0.91f, 0.805f, 0.95f, 11, Color.white,
+                TextAnchor.MiddleCenter);
+        }
+
+        private string GetSynchroMaterialSummary()
+        {
+            if (selectedSynchro == null || selectedSynchro.Kind != CardKind.Synchro)
+                return "";
+
+            List<CardInstance> materials = selectedMaterials
+                .Where(card => engine.Human.MonsterZones.Contains(card))
+                .ToList();
+            int selectedLevel = materials.Sum(card =>
+                DuelEngine.GetSynchroMaterialLevel(selectedSynchro, card));
+            int tunerCount = materials.Count(card => card.Definition.IsTuner);
+            return "Selected Level " + selectedLevel + " / " + selectedSynchro.Level +
+                   "  •  Tuners " + tunerCount + " / 1  •  Materials " + materials.Count;
         }
 
         private void DrawDuelResultsOverlay()
@@ -3824,12 +4366,8 @@ namespace DuelPrototype
             if (selectedSynchro != null && selectedSynchro.Kind == CardKind.Synchro &&
                 (engine.Phase == DuelPhase.MainOne || engine.Phase == DuelPhase.MainTwo))
             {
-                int selectedLevel = selectedMaterials
-                    .Where(card => engine.Human.MonsterZones.Contains(card))
-                    .Sum(card => card.Definition.Level);
-                return "Select face-up field monsters: 1 Tuner + non-Tuners, Level " +
-                       selectedLevel + " / " + selectedSynchro.Level +
-                       ". The summon completes automatically when materials match.";
+                return "Select face-up field monsters: exactly 1 Tuner + 1 or more non-Tuners. " +
+                       GetSynchroMaterialSummary() + ". Press SYNCHRO SUMMON when valid.";
             }
             switch (engine.Phase)
             {
@@ -3838,6 +4376,8 @@ namespace DuelPrototype
                 case DuelPhase.Standby:
                     return "Standby Phase. Select Main 1 when ready.";
                 case DuelPhase.MainOne:
+                    if (engine.Human.BattlePhaseSkippedTurn == engine.TurnNumber)
+                        return "Your Battle Phase is skipped this turn. Continue to Main Phase 2.";
                     if (selectedHandCard != null && selectedHandCard.Definition.IsMonster)
                     {
                         if (!selectedHandCard.Definition.CanNormalSummon)
@@ -4728,6 +5268,7 @@ namespace DuelPrototype
                     if (running)
                     {
                         engine.StepAiTurn();
+                        RecordReplayState();
                         Render();
                     }
                 }, 10);
@@ -4742,15 +5283,18 @@ namespace DuelPrototype
                 0.855f, 0.625f, 0.975f, 0.66f, 9,
                 aiAutoplay ? new Color(1f, 0.78f, 0.35f) : mutedColor,
                 TextAnchor.MiddleCenter, true);
-            AddButton(contentRoot, "HANDS",
+            AddButton(contentRoot, "SIMULATE",
                 0.855f, 0.585f, 0.975f, 0.62f,
+                new Color(0.15f, 0.38f, 0.66f), SimulateAiLabDuel, 10);
+            AddButton(contentRoot, "HANDS",
+                0.855f, 0.545f, 0.975f, 0.58f,
                 new Color(0.15f, 0.42f, 0.4f), () =>
                 {
                     aiHandsOpen = true;
                     Render();
                 }, 10);
             AddButton(contentRoot, "SELECT DECKS",
-                0.855f, 0.545f, 0.975f, 0.58f,
+                0.855f, 0.505f, 0.975f, 0.54f,
                 new Color(0.2f, 0.34f, 0.46f), () =>
                 {
                     aiAutoplay = false;
@@ -4759,7 +5303,7 @@ namespace DuelPrototype
                     Render();
                 }, 9);
             AddButton(contentRoot, "RESET",
-                0.855f, 0.505f, 0.975f, 0.54f,
+                0.855f, 0.465f, 0.975f, 0.5f,
                 new Color(0.36f, 0.22f, 0.24f), StartAiMatch, 10);
 
             DrawReadOnlyZones(engine.Human.MonsterZones, HumanMonsterY);
@@ -5815,6 +6359,35 @@ namespace DuelPrototype
         {
             RectTransform rect = CreateRect("Button", parent);
             SetAnchors(rect, xMin, yMin, xMax, yMax);
+            return ConfigureButton(rect, label, color, callback, fontSize, hoverCard, centerPreviewOnHover);
+        }
+
+        private RectTransform AddCenteredButton(
+            RectTransform parent,
+            string label,
+            float xOffset,
+            float size,
+            Color color,
+            Action callback,
+            int fontSize)
+        {
+            RectTransform rect = CreateRect("Button", parent);
+            rect.anchorMin = new Vector2(0.5f, 0.5f);
+            rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.anchoredPosition = new Vector2(xOffset, 0f);
+            rect.sizeDelta = new Vector2(size, size);
+            return ConfigureButton(rect, label, color, callback, fontSize, null, false);
+        }
+
+        private RectTransform ConfigureButton(
+            RectTransform rect,
+            string label,
+            Color color,
+            Action callback,
+            int fontSize,
+            CardDefinition hoverCard,
+            bool centerPreviewOnHover)
+        {
             Image image = rect.gameObject.AddComponent<Image>();
             image.color = color;
             Button button = rect.gameObject.AddComponent<Button>();
@@ -5966,6 +6539,8 @@ namespace DuelPrototype
                 observedEngine.PhaseChanged -= OnPhaseStarted;
                 observedEngine.AttackDeclared -= OnAttackDeclared;
                 observedEngine.CardDrawn -= OnCardDrawn;
+                observedEngine.TributeSummoned -= OnTributeSummoned;
+                observedEngine.MonsterDestroyed -= OnMonsterDestroyed;
                 observedEngine = null;
             }
             if (cardBackCircleSprite == null)

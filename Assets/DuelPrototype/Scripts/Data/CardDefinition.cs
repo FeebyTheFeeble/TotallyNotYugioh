@@ -57,6 +57,7 @@ namespace DuelPrototype
         KnightsCombo,
         AttackTheMoon,
         DestroySpellTrap,
+        DustTornado,
         DestroyAllSpellTraps,
         DestroyOpponentSpellTraps,
         SanganSearch,
