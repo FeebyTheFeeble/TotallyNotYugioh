@@ -309,6 +309,8 @@ namespace DuelPrototype
         private CardDefinition selectedSynchro;
         private readonly HashSet<CardInstance> selectedMaterials = new HashSet<CardInstance>();
         private readonly HashSet<CardInstance> selectedPowerToolCards = new HashSet<CardInstance>();
+        private readonly HashSet<CardInstance> selectedActivationDiscardCards =
+            new HashSet<CardInstance>();
         private List<CardDefinition> lastPack = new List<CardDefinition>();
         private string notice = "";
         private Font font;
@@ -442,7 +444,8 @@ namespace DuelPrototype
             if ((screen == ScreenMode.Duel ||
                  (screen == ScreenMode.TestLab && mockDuelSimulator != null)) &&
                 engine.IsHumanActionWindow && !engine.ResponseWindowOpen && !engine.SearchChoiceOpen &&
-                !engine.QuickdrawDiscardChoiceOpen &&
+                !engine.QuickdrawDiscardChoiceOpen && !engine.GraveyardSummonChoiceOpen &&
+                !engine.ActivationDiscardChoiceOpen &&
                 IsAutomaticHumanPhase() &&
                 !IsPresentationInProgress() && Time.unscaledTime >= nextAiStepTime)
             {
@@ -457,7 +460,8 @@ namespace DuelPrototype
                 engine.CurrentPlayer != engine.Human && engine.HasPendingAiActions;
             bool autoplayAiLab = screen == ScreenMode.AiLab && aiAutoplay && engine.IsAiVsAi;
             if ((!playAiTurn && !autoplayAiLab) || engine.ResponseWindowOpen || engine.SearchChoiceOpen ||
-                engine.QuickdrawDiscardChoiceOpen ||
+                engine.QuickdrawDiscardChoiceOpen || engine.GraveyardSummonChoiceOpen ||
+                engine.ActivationDiscardChoiceOpen ||
                 IsPresentationInProgress() || Time.unscaledTime < nextAiStepTime)
                 return;
 
@@ -833,7 +837,8 @@ namespace DuelPrototype
         private void RecordReplayState()
         {
             if (engine == null || engine.ResponseWindowOpen ||
-                engine.ResponseDiscardChoiceOpen || engine.SearchChoiceOpen)
+                engine.ResponseDiscardChoiceOpen || engine.SearchChoiceOpen ||
+                engine.GraveyardSummonChoiceOpen || engine.ActivationDiscardChoiceOpen)
                 return;
 
             replayStates.Add(engine.CaptureStateForReplay());
@@ -1062,6 +1067,12 @@ namespace DuelPrototype
                 DrawPowerToolChoiceOverlay();
             if (engine != null && engine.QuickdrawDiscardChoiceOpen && screen == ScreenMode.Duel)
                 DrawQuickdrawDiscardOverlay();
+            if (engine != null && engine.GraveyardSummonChoiceOpen && screen == ScreenMode.Duel)
+                DrawGraveyardSummonChoiceOverlay();
+            if (engine != null && engine.ActivationDiscardChoiceOpen && screen == ScreenMode.Duel)
+                DrawActivationDiscardChoiceOverlay();
+            else
+                selectedActivationDiscardCards.Clear();
             if (forfeitConfirmOpen && screen == ScreenMode.Duel && engine != null)
                 DrawForfeitConfirmationOverlay();
             if (pendingTributeSummonCard != null && screen == ScreenMode.Duel && engine != null)
@@ -1131,7 +1142,8 @@ namespace DuelPrototype
 
             bool aiTurnInProgress = screen == ScreenMode.Duel && engine != null &&
                 engine.CurrentPlayer != engine.Human && engine.HasPendingAiActions &&
-                !engine.ResponseWindowOpen && !engine.SearchChoiceOpen;
+                !engine.ResponseWindowOpen && !engine.SearchChoiceOpen &&
+                !engine.GraveyardSummonChoiceOpen && !engine.ActivationDiscardChoiceOpen;
             canvasInputGroup.interactable = !IsPresentationInProgress() && !aiTurnInProgress &&
                                             !coinFlipInProgress;
             canvasInputGroup.blocksRaycasts = true;
@@ -2697,6 +2709,109 @@ namespace DuelPrototype
                     engine.CancelQuickdrawDiscardChoice();
                     Render();
                 }, 11);
+        }
+
+        private void DrawGraveyardSummonChoiceOverlay()
+        {
+            IReadOnlyList<CardInstance> choices = engine.AvailableGraveyardSummons;
+            AddPanel(contentRoot, 0, 0.09f, 1, 0.9f, new Color(0.01f, 0.02f, 0.035f, 0.9f));
+            AddPanel(contentRoot, 0.12f, 0.15f, 0.88f, 0.85f, panelColor);
+            AddText(contentRoot, "SPECIAL SUMMON FROM THE GRAVEYARD",
+                0.17f, 0.76f, 0.83f, 0.82f, 18, accentColor, TextAnchor.MiddleCenter, true);
+            AddText(contentRoot, engine.GraveyardSummonChoicePrompt,
+                0.17f, 0.69f, 0.83f, 0.75f, 13, Color.white, TextAnchor.MiddleCenter);
+
+            RectTransform viewport = AddPanel(contentRoot, 0.2f, 0.29f, 0.8f, 0.67f, backgroundColor);
+            viewport.gameObject.AddComponent<Mask>().showMaskGraphic = true;
+            WheelScrollRect scroll = viewport.gameObject.AddComponent<WheelScrollRect>();
+            scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            ConfigureMouseWheelScrolling(scroll);
+
+            RectTransform list = CreateRect("Graveyard Summon Choices", viewport);
+            list.anchorMin = new Vector2(0, 1);
+            list.anchorMax = new Vector2(1, 1);
+            list.pivot = new Vector2(0.5f, 1);
+            list.sizeDelta = new Vector2(0, choices.Count * 58f);
+            scroll.content = list;
+            scroll.viewport = viewport;
+            scroll.verticalNormalizedPosition = 1;
+            for (int i = 0; i < choices.Count; i++)
+            {
+                CardInstance choice = choices[i];
+                AddScrollListButton(list,
+                    "SPECIAL SUMMON " + choice.Definition.DisplayName + "  •  Level " +
+                    choice.Definition.Level,
+                    i, 58f, CardFrameColor(choice.Definition),
+                    () =>
+                    {
+                        if (engine.TryChooseGraveyardSummon(choice))
+                            RecordReplayState();
+                        Render();
+                    }, 12);
+            }
+
+            AddButton(contentRoot, "SKIP EFFECT", 0.39f, 0.19f, 0.61f, 0.26f,
+                new Color(0.25f, 0.29f, 0.34f), () =>
+                {
+                    if (engine.TrySkipGraveyardSummonChoice())
+                        RecordReplayState();
+                    Render();
+                }, 12);
+        }
+
+        private void DrawActivationDiscardChoiceOverlay()
+        {
+            IReadOnlyList<CardInstance> choices = engine.AvailableActivationDiscards;
+            selectedActivationDiscardCards.RemoveWhere(card => !choices.Contains(card));
+            AddPanel(contentRoot, 0, 0.09f, 1, 0.9f, new Color(0.01f, 0.02f, 0.035f, 0.9f));
+            AddPanel(contentRoot, 0.12f, 0.15f, 0.88f, 0.85f, panelColor);
+            AddText(contentRoot, "CHOOSE DISCARD",
+                0.17f, 0.76f, 0.83f, 0.82f, 18, accentColor, TextAnchor.MiddleCenter, true);
+            AddText(contentRoot, engine.ActivationDiscardChoicePrompt,
+                0.17f, 0.69f, 0.83f, 0.75f, 13, Color.white, TextAnchor.MiddleCenter);
+
+            for (int i = 0; i < choices.Count; i++)
+            {
+                CardInstance choice = choices[i];
+                int column = i % 2;
+                int row = i / 2;
+                float x = column == 0 ? 0.18f : 0.51f;
+                float top = 0.65f - row * 0.105f;
+                bool selected = selectedActivationDiscardCards.Contains(choice);
+                AddButton(contentRoot,
+                    (selected ? "SELECTED: " : "DISCARD: ") + choice.Definition.DisplayName,
+                    x, top - 0.075f, x + 0.31f, top,
+                    selected ? new Color(0.12f, 0.52f, 0.43f) :
+                        CardFrameColor(choice.Definition),
+                    () =>
+                    {
+                        if (selectedActivationDiscardCards.Contains(choice))
+                            selectedActivationDiscardCards.Remove(choice);
+                        else if (selectedActivationDiscardCards.Count < engine.ActivationDiscardCount)
+                            selectedActivationDiscardCards.Add(choice);
+                        Render();
+                    }, 11, choice.Definition);
+            }
+
+            bool canConfirm = selectedActivationDiscardCards.Count == engine.ActivationDiscardCount;
+            AddButton(contentRoot,
+                "CONFIRM DISCARD (" + selectedActivationDiscardCards.Count + "/" +
+                engine.ActivationDiscardCount + ")",
+                0.32f, 0.19f, 0.68f, 0.26f,
+                canConfirm ? accentColor : new Color(0.2f, 0.25f, 0.31f),
+                () =>
+                {
+                    if (!canConfirm)
+                        return;
+                    bool activated = engine.TryChooseActivationDiscards(
+                        selectedActivationDiscardCards.ToList());
+                    selectedActivationDiscardCards.Clear();
+                    if (activated)
+                        RecordReplayState();
+                    Render();
+                }, 12);
         }
 
         private void DrawDustTornadoResponseOverlay()

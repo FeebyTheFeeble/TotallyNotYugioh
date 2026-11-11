@@ -847,6 +847,8 @@ namespace DuelPrototype.Tests
             Assert.IsTrue(engine.TryAttack(shura, defender));
 
             Assert.Contains(defender, engine.Opponent.Graveyard);
+            Assert.IsTrue(engine.SearchChoiceOpen);
+            Assert.IsTrue(engine.TryChooseSearchCard(gale));
             Assert.Contains(gale, engine.Human.MonsterZones);
             Assert.IsTrue(gale.EffectsNegated);
             Assert.IsFalse(engine.Human.Deck.Contains(gale));
@@ -1455,6 +1457,9 @@ namespace DuelPrototype.Tests
             engine.Human.Hand.AddRange(new[] { gracefulCharity, firstDiscard, secondDiscard });
 
             Assert.IsTrue(engine.TryActivate(gracefulCharity));
+            Assert.IsTrue(engine.ActivationDiscardChoiceOpen);
+            Assert.AreEqual(2, engine.ActivationDiscardCount);
+            Assert.IsTrue(engine.TryChooseActivationDiscards(new[] { firstDiscard, secondDiscard }));
 
             Assert.AreEqual(3, engine.Human.Hand.Count);
             Assert.Contains(firstDiscard, engine.Human.Graveyard);
@@ -1605,15 +1610,19 @@ namespace DuelPrototype.Tests
         {
             CardInstance lightningVortex = new CardInstance(StarterCatalog.Find("69162969"));
             CardInstance discard = new CardInstance(StarterCatalog.Find("13039848"));
+            CardInstance keep = new CardInstance(StarterCatalog.Find("67270095"));
             CardInstance faceUpMonster = new CardInstance(StarterCatalog.Find("13039848"));
             CardInstance setMonster = new CardInstance(StarterCatalog.Find("13039848"), false);
-            engine.Human.Hand.AddRange(new[] { lightningVortex, discard });
+            engine.Human.Hand.AddRange(new[] { lightningVortex, discard, keep });
             engine.Opponent.MonsterZones[0] = faceUpMonster;
             engine.Opponent.MonsterZones[1] = setMonster;
 
             Assert.IsTrue(engine.TryActivate(lightningVortex));
+            Assert.IsTrue(engine.ActivationDiscardChoiceOpen);
+            Assert.IsTrue(engine.TryChooseActivationDiscards(new[] { discard }));
 
             Assert.Contains(discard, engine.Human.Graveyard);
+            Assert.Contains(keep, engine.Human.Hand);
             Assert.Contains(lightningVortex, engine.Human.Graveyard);
             Assert.Contains(faceUpMonster, engine.Opponent.Graveyard);
             Assert.AreSame(setMonster, engine.Opponent.MonsterZones[1]);
@@ -1950,6 +1959,8 @@ namespace DuelPrototype.Tests
 
             Assert.IsTrue(engine.TryNormalSummon(blizzard, Array.Empty<CardInstance>()));
 
+            Assert.IsTrue(engine.GraveyardSummonChoiceOpen);
+            Assert.IsTrue(engine.TryChooseGraveyardSummon(graveyardBlackwing));
             Assert.Contains(graveyardBlackwing, engine.Human.MonsterZones);
             Assert.IsFalse(graveyardBlackwing.AttackPosition);
             Assert.Contains(blizzard, engine.Human.MonsterZones);
@@ -2187,6 +2198,8 @@ namespace DuelPrototype.Tests
             Assert.IsTrue(engine.TryAttack(fighter, opponentAttacker));
 
             Assert.Contains(fighter, engine.Human.Graveyard);
+            Assert.IsTrue(engine.GraveyardSummonChoiceOpen);
+            Assert.IsTrue(engine.TryChooseGraveyardSummon(warrior));
             Assert.Contains(warrior, engine.Human.MonsterZones);
         }
 
@@ -2201,6 +2214,8 @@ namespace DuelPrototype.Tests
 
             Assert.IsTrue(engine.TryNormalSummon(debris, Array.Empty<CardInstance>()));
 
+            Assert.IsTrue(engine.GraveyardSummonChoiceOpen);
+            Assert.IsTrue(engine.TryChooseGraveyardSummon(target));
             Assert.Contains(target, engine.Human.MonsterZones);
             Assert.IsTrue(target.EffectsNegated);
             Assert.IsTrue(target.AttackPosition);
@@ -2451,12 +2466,19 @@ namespace DuelPrototype.Tests
         {
             CardInstance junkSynchron = new CardInstance(StarterCatalog.Find("63977008"));
             CardInstance target = new CardInstance(StarterCatalog.Find("53855409"));
+            CardInstance otherTarget = new CardInstance(StarterCatalog.Find("93542102"));
             engine.Human.Graveyard.Add(target);
+            engine.Human.Graveyard.Add(otherTarget);
             engine.Human.Hand.Add(junkSynchron);
 
             Assert.IsTrue(engine.TryNormalSummon(junkSynchron, Array.Empty<CardInstance>()));
 
+            Assert.IsTrue(engine.GraveyardSummonChoiceOpen);
+            CollectionAssert.AreEquivalent(new[] { target, otherTarget },
+                engine.AvailableGraveyardSummons);
+            Assert.IsTrue(engine.TryChooseGraveyardSummon(target));
             Assert.Contains(target, engine.Human.MonsterZones);
+            Assert.Contains(otherTarget, engine.Human.Graveyard);
             Assert.IsFalse(target.AttackPosition);
             Assert.IsTrue(target.EffectsNegated);
         }
@@ -2682,8 +2704,12 @@ namespace DuelPrototype.Tests
             engine.Human.Deck.Add(levelOne);
 
             Assert.IsTrue(engine.TryActivate(oneForOne));
+            Assert.IsTrue(engine.ActivationDiscardChoiceOpen);
+            Assert.IsTrue(engine.TryChooseActivationDiscards(new[] { discard }));
 
             Assert.Contains(discard, engine.Human.Graveyard);
+            Assert.IsTrue(engine.SearchChoiceOpen);
+            Assert.IsTrue(engine.TryChooseSearchCard(levelOne));
             Assert.Contains(levelOne, engine.Human.MonsterZones);
             Assert.IsEmpty(engine.Human.Deck);
         }
@@ -3023,6 +3049,8 @@ namespace DuelPrototype.Tests
             engine.Opponent.MonsterZones[0] = target;
 
             Assert.IsTrue(engine.TryActivate(raigekiBreak, target));
+            Assert.IsTrue(engine.ActivationDiscardChoiceOpen);
+            Assert.IsTrue(engine.TryChooseActivationDiscards(new[] { discard }));
 
             Assert.Contains(discard, engine.Human.Graveyard);
             Assert.Contains(target, engine.Opponent.Graveyard);
@@ -3041,6 +3069,8 @@ namespace DuelPrototype.Tests
             engine.Opponent.MonsterZones[0] = target;
 
             Assert.IsTrue(engine.TryActivate(darkCore, target));
+            Assert.IsTrue(engine.ActivationDiscardChoiceOpen);
+            Assert.IsTrue(engine.TryChooseActivationDiscards(new[] { discard }));
 
             Assert.Contains(discard, engine.Human.Graveyard);
             Assert.Contains(darkCore, engine.Human.Graveyard);
@@ -3679,6 +3709,8 @@ namespace DuelPrototype.Tests
 
             Assert.IsTrue(engine.TryNormalSummon(explorer, Array.Empty<CardInstance>()));
 
+            Assert.IsTrue(engine.GraveyardSummonChoiceOpen);
+            Assert.IsTrue(engine.TryChooseGraveyardSummon(junkSynchron));
             Assert.Contains(junkSynchron, engine.Human.MonsterZones);
             Assert.IsTrue(junkSynchron.EffectsNegated);
             Assert.IsTrue(junkSynchron.AttackPosition);
